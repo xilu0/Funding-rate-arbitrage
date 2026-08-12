@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hyperliquid 现货与U本位永续套利资金费率监控</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation / Header -->
+        <header class="main-header">
+            <div class="brand-area">
+                <div class="logo-badge">⚡</div>
+                <div>
+                    <h1>Hyperliquid 资金费率监控与套利计算器</h1>
+                    <p class="subtitle">实时监控现货 & U本位永续合约双边资产 | 资金费率排序 | 市价单手续费回本预测</p>
+                </div>
+            </div>
+            <div class="header-status">
+                <div class="status-indicator">
+                    <span class="pulse-dot"></span>
+                    <span id="sync-status">实时连接中...</span>
+                </div>
+                <div class="last-update" id="last-update-time">--:--:--</div>
+            </div>
+        </header>
+
+        <!-- Stats Overview Cards -->
+        <section class="stats-grid">
+            <div class="stat-card gradient-emerald">
+                <div class="stat-icon">📈</div>
+                <div class="stat-content">
+                    <span class="stat-label">最高年化收益率 (APR)</span>
+                    <div class="stat-value" id="top-apr-val">--%</div>
+                    <span class="stat-sub" id="top-apr-coin">--</span>
+                </div>
+            </div>
+            <div class="stat-card gradient-cyan">
+                <div class="stat-icon">⏱️</div>
+                <div class="stat-content">
+                    <span class="stat-label">最快手续费回本时间</span>
+                    <div class="stat-value" id="fast-payback-val">--</div>
+                    <span class="stat-sub" id="fast-payback-coin">--</span>
+                </div>
+            </div>
+            <div class="stat-card gradient-purple">
+                <div class="stat-icon">🔄</div>
+                <div class="stat-content">
+                    <span class="stat-label">双边重合标的数量</span>
+                    <div class="stat-value" id="pair-count-val">0</div>
+                    <span class="stat-sub">现货 + U本位永续合约</span>
+                </div>
+            </div>
+            <div class="stat-card gradient-orange">
+                <div class="stat-icon">🔥</div>
+                <div class="stat-content">
+                    <span class="stat-label">最大交易量套利标的</span>
+                    <div class="stat-value" id="top-vol-val">$0</div>
+                    <span class="stat-sub" id="top-vol-coin">--</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Control Toolbar -->
+        <section class="control-panel">
+            <div class="filter-group">
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="search-input" placeholder="搜索币种名称 (如 HYPE, BTC, TRUMP)...">
+                </div>
+            </div>
+
+            <div class="config-group">
+                <div class="config-item">
+                    <label for="spot-fee-input">现货 Taker 费率 (%)</label>
+                    <input type="number" id="spot-fee-input" value="0.07" step="0.005" min="0">
+                </div>
+                <div class="config-item">
+                    <label for="perp-fee-input">永续 Taker 费率 (%)</label>
+                    <input type="number" id="perp-fee-input" value="0.035" step="0.005" min="0">
+                </div>
+                <div class="config-item">
+                    <label for="max-spread-input">最大容许价差 (%)</label>
+                    <input type="number" id="max-spread-input" value="100" step="10" min="0" title="过滤因同名模因币碰撞导致的异常价差 (0表示不限制)">
+                </div>
+                <div class="config-item">
+                    <label for="payback-mode">回本计算模式</label>
+                    <select id="payback-mode">
+                        <option value="entry">开仓单边手续费 (Entry)</option>
+                        <option value="roundtrip" selected>开平双边手续费 (Roundtrip)</option>
+                    </select>
+                </div>
+                <div class="config-item checkbox-item">
+                    <input type="checkbox" id="alias-toggle" checked>
+                    <label for="alias-toggle">包含 Unit/Wrapped 别名 (如 UBTC->BTC)</label>
+                </div>
+                <div class="config-item">
+                    <label for="refresh-rate">自动刷新</label>
+                    <select id="refresh-rate">
+                        <option value="3">3 秒</option>
+                        <option value="5" selected>5 秒</option>
+                        <option value="10">10 秒</option>
+                        <option value="30">30 秒</option>
+                        <option value="0">暂停</option>
+                    </select>
+                </div>
+                <button id="btn-refresh" class="btn-primary">🔄 刷新数据</button>
+            </div>
+        </section>
+
+        <!-- Data Table Container -->
+        <section class="table-card">
+            <div class="table-header-bar">
+                <h2>全量套利标的监控列表</h2>
+                <div class="fee-badge" id="fee-summary-badge">
+                    当前开仓费率: 0.105% | 完整双边费率: 0.210%
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th data-sort="rank" class="sortable">排名</th>
+                            <th data-sort="coin" class="sortable">币种</th>
+                            <th data-sort="spot_pair" class="sortable">现货交易对</th>
+                            <th data-sort="hourly_funding" class="sortable desc">1小时资金费率 ▲</th>
+                            <th data-sort="apr_pct" class="sortable">年化利率 (APR)</th>
+                            <th data-sort="apy_pct" class="sortable">复利年化 (APY)</th>
+                            <th data-sort="spot_price" class="sortable">现货价格</th>
+                            <th data-sort="perp_price" class="sortable">永续价格</th>
+                            <th data-sort="spread_pct" class="sortable">基差 (Spread)</th>
+                            <th data-sort="payback_hrs" class="sortable">市价单手续费回本时间</th>
+                            <th data-sort="perp_24h_volume" class="sortable">24h永续成交量</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body">
+                        <tr>
+                            <td colspan="11" class="loading-cell">正在获取 Hyperliquid 最新数据...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

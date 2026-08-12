@@ -65,8 +65,98 @@ class TestFundingRateCalculator(unittest.TestCase):
         self.assertEqual(len(res), 2)
         # Should be sorted by funding rate descending (HYPE: 0.0001 > BTC: 0.00005)
         self.assertEqual(res[0]["coin"], "HYPE")
+        self.assertEqual(res[0]["exchange"], "Hyperliquid")
         self.assertEqual(res[1]["coin"], "BTC")
         self.assertEqual(res[1]["spot_symbol"], "UBTC")
 
+    def test_parse_base_multiplier(self):
+        from src.calculator import parse_base_multiplier
+        self.assertEqual(parse_base_multiplier("1000PEPE"), (1000.0, "PEPE"))
+        self.assertEqual(parse_base_multiplier("1000000BABYDOGE"), (1000000.0, "BABYDOGE"))
+        self.assertEqual(parse_base_multiplier("0G"), (1.0, "0G"))
+        self.assertEqual(parse_base_multiplier("1INCH"), (1.0, "1INCH"))
+        self.assertEqual(parse_base_multiplier("BTC"), (1.0, "BTC"))
+
+    def test_match_and_calculate_bybit(self):
+        bybit_calc = FundingRateCalculator(spot_taker_fee=0.0010, perp_taker_fee=0.00055)
+        
+        linear_tickers = [
+            {
+                "symbol": "1000PEPEUSDT",
+                "lastPrice": "0.0030",
+                "fundingRate": "0.0004",
+                "fundingIntervalHour": "4",
+                "turnover24h": "1000000"
+            },
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "60000.0",
+                "fundingRate": "0.0001",
+                "fundingIntervalHour": "8",
+                "turnover24h": "5000000"
+            }
+        ]
+        spot_tickers = [
+            {
+                "symbol": "PEPEUSDT",
+                "lastPrice": "0.0000029",
+                "turnover24h": "500000"
+            },
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "59900.0",
+                "turnover24h": "2000000"
+            }
+        ]
+        linear_instruments = [
+            {"symbol": "1000PEPEUSDT", "baseCoin": "1000PEPE", "quoteCoin": "USDT"},
+            {"symbol": "BTCUSDT", "baseCoin": "BTC", "quoteCoin": "USDT"}
+        ]
+        spot_instruments = [
+            {"symbol": "PEPEUSDT", "baseCoin": "PEPE", "quoteCoin": "USDT"},
+            {"symbol": "BTCUSDT", "baseCoin": "BTC", "quoteCoin": "USDT"}
+        ]
+
+        res = bybit_calc.match_and_calculate_bybit(linear_tickers, spot_tickers, linear_instruments, spot_instruments)
+
+        self.assertEqual(len(res), 2)
+        # 1000PEPE funding: 0.0004 / 4h = 0.0001 / h -> 0.01%/h
+        # BTC funding: 0.0001 / 8h = 0.0000125 / h -> 0.00125%/h
+        self.assertEqual(res[0]["coin"], "1000PEPEUSDT")
+        self.assertEqual(res[0]["spot_symbol"], "PEPEUSDT")
+        self.assertEqual(res[0]["exchange"], "Bybit")
+        self.assertAlmostEqual(res[0]["spot_price"], 0.0029)  # 0.0000029 * 1000
+        self.assertAlmostEqual(res[0]["hourly_funding"], 0.0001)
+
+        self.assertEqual(res[1]["coin"], "BTCUSDT")
+        self.assertEqual(res[1]["exchange"], "Bybit")
+        self.assertAlmostEqual(res[1]["hourly_funding"], 0.0000125)
+
+    def test_calculate_funding_history_stats(self):
+        raw_history = [
+            {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1000000000000"},
+            {"symbol": "BTCUSDT", "fundingRate": "0.0002", "fundingRateTimestamp": "1000028800000"},
+            {"symbol": "BTCUSDT", "fundingRate": "-0.0001", "fundingRateTimestamp": "1000057600000"}
+        ]
+
+        hist = FundingRateCalculator.calculate_funding_history_stats(raw_history)
+
+        self.assertEqual(hist["symbol"], "BTCUSDT")
+        self.assertEqual(hist["total_periods"], 3)
+        self.assertEqual(hist["funding_interval_hr"], 8.0)
+
+        stats = hist["stats"]
+        # Cumulative = 0.0001 + 0.0002 - 0.0001 = 0.0002 = 0.02%
+        self.assertAlmostEqual(stats["cumulative_funding_pct"], 0.02)
+        # Pos count = 2, Neg count = 1
+        self.assertEqual(stats["pos_count"], 2)
+        self.assertEqual(stats["neg_count"], 1)
+        self.assertAlmostEqual(stats["pos_pct"], 66.66666666666666)
+        # Max rate = 0.02%, Min rate = -0.01%
+        self.assertAlmostEqual(stats["max_rate_pct"], 0.02)
+        self.assertAlmostEqual(stats["min_rate_pct"], -0.01)
+
 if __name__ == "__main__":
     unittest.main()
+
+

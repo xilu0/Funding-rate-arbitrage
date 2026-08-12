@@ -2,15 +2,23 @@ import os
 import json
 import urllib.parse
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from src.hyperliquid_client import HyperliquidClient
-from src.calculator import FundingRateCalculator
+from src.bybit_client import BybitClient
+from src.calculator import (
+    FundingRateCalculator,
+    DEFAULT_HL_SPOT_TAKER_FEE,
+    DEFAULT_HL_PERP_TAKER_FEE,
+    DEFAULT_BYBIT_SPOT_TAKER_FEE,
+    DEFAULT_BYBIT_PERP_TAKER_FEE
+)
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 class ArbitrageServerHandler(SimpleHTTPRequestHandler):
-    client: HyperliquidClient = None
+    hl_client: HyperliquidClient = None
+    bybit_client: BybitClient = None
     calculator: FundingRateCalculator = None
     cache: Dict[str, Any] = {}
 
@@ -23,15 +31,321 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/funding-rates":
             self.handle_api_funding_rates(parsed.query)
+        elif path == "/api/bybit/funding-history":
+            self.handle_api_bybit_funding_history(parsed.query)
+        elif path == "/api/depth-capacity":
+            self.handle_api_depth_capacity(parsed.query)
+        elif path == "/api/bybit/build-arbitrage":
+            self.handle_api_bybit_build_arbitrage(parsed.query)
         else:
             # Fallback to serving static files from web/ directory
             super().do_GET()
 
+    def handle_api_bybit_build_arbitrage(self, query_str: str):
+        params = urllib.parse.parse_qs(query_str)
+        symbol = params.get("symbol", ["BTCUSDT"])[0].strip()
+        amount_usd_str = params.get("amount_usd", [""])[0].strip()
+        amount_qty_str = params.get("amount_qty", [""])[0].strip()
+        dry_run = params.get("dry_run", ["true"])[0].lower() != "false"
+        force = params.get("force", ["false"])[0].lower() == "true"
+        max_slippage_str = params.get("max_slippage", ["0.50"])[0].strip()
+        max_payback_str = params.get("max_payback", ["72.0"])[0].strip()
+
+        try:
+            amount_usd = float(amount_usd_str) if amount_usd_str else None
+        except ValueError:
+            amount_usd = None
+
+        try:
+            amount_qty = float(amount_qty_str) if amount_qty_str else None
+        except ValueError:
+            amount_qty = None
+
+        try:
+            max_slippage = float(max_slippage_str) if max_slippage_str else 0.50
+        except ValueError:
+            max_slippage = 0.50
+
+        try:
+            max_payback = float(max_payback_str) if max_payback_str else 72.0
+        except ValueError:
+            max_payback = 72.0
+
+        if amount_usd is None and amount_qty is None:
+            amount_usd = 10000.0
+
+        try:
+            from src.bybit_executor import BybitArbitrageExecutor
+            from src.calculator import parse_base_multiplier, safe_float
+
+            if not self.bybit_client:
+                self.bybit_client = BybitClient()
+
+            executor = BybitArbitrageExecutor(
+                calculator=self.calculator,
+                default_max_slippage_pct=max_slippage,
+                default_max_payback_hours=max_payback
+            )
+
+            linear_tickers, _ = self.bybit_client.get_linear_market_data()
+            perp_ticker = next((t for t in linear_tickers if t.get("symbol") == symbol), {})
+            
+            funding_rate = safe_float(perp_ticker.get("fundingRate"))
+            interval_hr = safe_float(perp_ticker.get("fundingIntervalHour"), default=8.0)
+            hourly_funding = funding_rate / (interval_hr if interval_hr > 0 else 8.0)
+            perp_price = safe_float(perp_ticker.get("lastPrice"))
+
+            base_coin = symbol[:-4] if symbol.endswith("USDT") or symbol.endswith("USDC") else symbol
+            mult, clean_base = parse_base_multiplier(base_coin)
+            spot_symbol = f"{clean_base}USDT"
+
+            spot_tickers, _ = self.bybit_client.get_spot_market_data()
+            spot_ticker = next((t for t in spot_tickers if t.get("symbol") == spot_symbol), {})
+            spot_price = safe_float(spot_ticker.get("lastPrice")) * mult
+
+            size_info = executor.parse_execution_size(
+                symbol=symbol,
+                amount_usd=amount_usd,
+                amount_qty=amount_qty,
+                spot_price=spot_price,
+                perp_price=perp_price
+            )
+
+            spot_book = self.bybit_client.get_orderbook("spot", spot_symbol, limit=200)
+            perp_book = self.bybit_client.get_orderbook("linear", symbol, limit=200)
+
+            spot_raw_asks = spot_book.get("a", [])
+            spot_raw_bids = spot_book.get("b", [])
+            perp_raw_asks = perp_book.get("a", [])
+            perp_raw_bids = perp_book.get("b", [])
+
+            spot_asks = [(safe_float(px) * mult, safe_float(sz) / mult) for px, sz in spot_raw_asks]
+            spot_bids = [(safe_float(px) * mult, safe_float(sz) / mult) for px, sz in spot_raw_bids]
+            perp_asks = [(safe_float(px), safe_float(sz)) for px, sz in perp_raw_asks]
+            perp_bids = [(safe_float(px), safe_float(sz)) for px, sz in perp_raw_bids]
+
+            spot_mid_px = (spot_asks[0][0] + spot_bids[0][0]) / 2.0 if spot_asks and spot_bids else spot_price
+            perp_mid_px = (perp_asks[0][0] + perp_bids[0][0]) / 2.0 if perp_asks and perp_bids else perp_price
+
+            try_run_plan = executor.generate_try_run_plan(
+                symbol=symbol,
+                spot_symbol=spot_symbol,
+                multiplier=mult,
+                target_usd=size_info["target_usd"],
+                spot_qty=size_info["spot_qty"],
+                perp_contracts_qty=size_info["perp_contracts_qty"],
+                hourly_funding=hourly_funding,
+                spot_asks=spot_asks,
+                spot_bids=spot_bids,
+                spot_mid_px=spot_mid_px,
+                perp_asks=perp_asks,
+                perp_bids=perp_bids,
+                perp_mid_px=perp_mid_px,
+                max_slippage_pct=max_slippage,
+                max_payback_hours=max_payback,
+                force=force
+            )
+
+            payload = {
+                "status": "success",
+                "mode": "DRY_RUN" if dry_run else "LIVE",
+                "symbol": symbol,
+                "spot_symbol": spot_symbol,
+                "size_info": size_info,
+                "try_run_plan": try_run_plan
+            }
+
+            response_bytes = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(response_bytes)))
+            self.end_headers()
+            self.wfile.write(response_bytes)
+        except Exception as e:
+            err_payload = {"status": "error", "message": str(e)}
+            err_bytes = json.dumps(err_payload).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(err_bytes)
+
+
+    def handle_api_depth_capacity(self, query_str: str):
+        params = urllib.parse.parse_qs(query_str)
+        exchange = params.get("exchange", ["bybit"])[0].lower()
+        symbol = params.get("symbol", ["BTCUSDT"])[0].strip()
+        spot_symbol = params.get("spot_symbol", [""])[0].strip()
+        target_usd_str = params.get("target_usd", [""])[0].strip()
+        
+        custom_target_usd = None
+        if target_usd_str:
+            try:
+                custom_target_usd = float(target_usd_str)
+            except ValueError:
+                pass
+
+        default_spot_fee = 0.10 if exchange == "bybit" else 0.07
+        default_perp_fee = 0.055 if exchange == "bybit" else 0.035
+        spot_fee_pct = float(params.get("spot_fee", [default_spot_fee])[0])
+        perp_fee_pct = float(params.get("perp_fee", [default_perp_fee])[0])
+
+        calc = FundingRateCalculator(
+            spot_taker_fee=spot_fee_pct / 100.0,
+            perp_taker_fee=perp_fee_pct / 100.0
+        )
+
+        try:
+            from src.calculator import parse_base_multiplier, safe_float
+
+            if exchange in ["bybit"]:
+                if not self.bybit_client:
+                    self.bybit_client = BybitClient()
+
+                linear_tickers, _ = self.bybit_client.get_linear_market_data()
+                perp_ticker = next((t for t in linear_tickers if t.get("symbol") == symbol), {})
+                
+                funding_rate = safe_float(perp_ticker.get("fundingRate"))
+                interval_hr = safe_float(perp_ticker.get("fundingIntervalHour"), default=8.0)
+                hourly_funding = funding_rate / (interval_hr if interval_hr > 0 else 8.0)
+
+                if not spot_symbol:
+                    base_coin = symbol[:-4] if symbol.endswith("USDT") or symbol.endswith("USDC") else symbol
+                    mult, clean_base = parse_base_multiplier(base_coin)
+                    spot_symbol = f"{clean_base}USDT"
+                else:
+                    mult, clean_base = parse_base_multiplier(symbol[:-4] if symbol.endswith("USDT") else symbol)
+
+                spot_book = self.bybit_client.get_orderbook("spot", spot_symbol, limit=200)
+                perp_book = self.bybit_client.get_orderbook("linear", symbol, limit=200)
+
+                spot_raw_asks = spot_book.get("a", [])
+                spot_raw_bids = spot_book.get("b", [])
+                perp_raw_asks = perp_book.get("a", [])
+                perp_raw_bids = perp_book.get("b", [])
+
+                spot_asks = [(safe_float(px) * mult, safe_float(sz) / mult) for px, sz in spot_raw_asks]
+                spot_bids = [(safe_float(px) * mult, safe_float(sz) / mult) for px, sz in spot_raw_bids]
+                perp_asks = [(safe_float(px), safe_float(sz)) for px, sz in perp_raw_asks]
+                perp_bids = [(safe_float(px), safe_float(sz)) for px, sz in perp_raw_bids]
+
+                spot_mid_px = (spot_asks[0][0] + spot_bids[0][0]) / 2.0 if spot_asks and spot_bids else safe_float(perp_ticker.get("lastPrice"))
+                perp_mid_px = (perp_asks[0][0] + perp_bids[0][0]) / 2.0 if perp_asks and perp_bids else safe_float(perp_ticker.get("lastPrice"))
+
+            else:
+                # Hyperliquid
+                if not self.hl_client:
+                    self.hl_client = HyperliquidClient()
+
+                perp_univ, perp_ctxs = self.hl_client.get_perp_market_data()
+                matched_idx = next((i for i, u in enumerate(perp_univ) if u.get("name") == symbol), 0)
+                ctx = perp_ctxs[matched_idx] if matched_idx < len(perp_ctxs) else {}
+                hourly_funding = safe_float(ctx.get("funding"))
+
+                hl_book = self.hl_client.get_l2_book(symbol)
+                levels = hl_book.get("levels", [[], []])
+                bids_raw = levels[0] if len(levels) > 0 else []
+                asks_raw = levels[1] if len(levels) > 1 else []
+
+                perp_asks = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in asks_raw]
+                perp_bids = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in bids_raw]
+                spot_asks = perp_asks # Fallback for HL if spot book separate
+                spot_bids = perp_bids
+
+                spot_mid_px = (spot_asks[0][0] + spot_bids[0][0]) / 2.0 if spot_asks and spot_bids else safe_float(ctx.get("midPx"))
+                perp_mid_px = spot_mid_px
+
+            capacity_eval = calc.evaluate_capital_capacity(
+                spot_asks=spot_asks,
+                spot_bids=spot_bids,
+                spot_mid_px=spot_mid_px,
+                perp_asks=perp_asks,
+                perp_bids=perp_bids,
+                perp_mid_px=perp_mid_px,
+                hourly_funding=hourly_funding,
+                custom_target_usd=custom_target_usd
+            )
+
+            payload = {
+                "status": "success",
+                "exchange": exchange,
+                "symbol": symbol,
+                "spot_symbol": spot_symbol or symbol,
+                "data": capacity_eval
+            }
+
+            response_bytes = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(response_bytes)))
+            self.end_headers()
+            self.wfile.write(response_bytes)
+        except Exception as e:
+            err_payload = {"status": "error", "message": str(e)}
+            err_bytes = json.dumps(err_payload).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(err_bytes)
+
+
+    def handle_api_bybit_funding_history(self, query_str: str):
+        params = urllib.parse.parse_qs(query_str)
+        symbol = params.get("symbol", ["BTCUSDT"])[0].strip()
+        days_str = params.get("days", ["30"])[0].strip()
+        limit_str = params.get("limit", ["200"])[0].strip()
+
+        try:
+            days = int(days_str) if days_str else 30
+        except ValueError:
+            days = 30
+
+        try:
+            limit = int(limit_str) if limit_str else 200
+        except ValueError:
+            limit = 200
+
+        try:
+            if not self.bybit_client:
+                self.bybit_client = BybitClient()
+
+            raw_history = self.bybit_client.get_funding_rate_history(symbol, limit=limit)
+            result_payload = FundingRateCalculator.calculate_funding_history_stats(raw_history, days=days)
+
+            payload = {
+                "status": "success",
+                "symbol": symbol,
+                "data": result_payload
+            }
+
+            response_bytes = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(response_bytes)))
+            self.end_headers()
+            self.wfile.write(response_bytes)
+        except Exception as e:
+            err_payload = {"status": "error", "message": str(e)}
+            err_bytes = json.dumps(err_payload).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(err_bytes)
+
+
     def handle_api_funding_rates(self, query_str: str):
         params = urllib.parse.parse_qs(query_str)
         
-        spot_fee_pct = float(params.get("spot_fee", [0.07])[0])
-        perp_fee_pct = float(params.get("perp_fee", [0.035])[0])
+        exchange = params.get("exchange", ["all"])[0].lower()
+        
+        # Default fee logic per exchange if not explicitly passed
+        default_spot_fee = 0.10 if exchange == "bybit" else 0.07
+        default_perp_fee = 0.055 if exchange == "bybit" else 0.035
+
+        spot_fee_pct = float(params.get("spot_fee", [default_spot_fee])[0])
+        perp_fee_pct = float(params.get("perp_fee", [default_perp_fee])[0])
         enable_aliases = params.get("enable_aliases", ["true"])[0].lower() == "true"
         max_spread_pct = float(params.get("max_spread", [100.0])[0])
 
@@ -44,17 +358,37 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
         )
 
         try:
-            perp_univ, perp_ctxs = self.client.get_perp_market_data()
-            spot_toks, spot_univ, spot_ctxs = self.client.get_spot_market_data()
+            results: List[Dict[str, Any]] = []
 
-            results = calc.match_and_calculate(
-                perp_univ, perp_ctxs, spot_toks, spot_univ, spot_ctxs
-            )
+            # 1. Hyperliquid
+            if exchange in ["hyperliquid", "all", "hl"]:
+                if self.hl_client:
+                    perp_univ, perp_ctxs = self.hl_client.get_perp_market_data()
+                    spot_toks, spot_univ, spot_ctxs = self.hl_client.get_spot_market_data()
+                    hl_results = calc.match_and_calculate(
+                        perp_univ, perp_ctxs, spot_toks, spot_univ, spot_ctxs
+                    )
+                    results.extend(hl_results)
+
+            # 2. Bybit
+            if exchange in ["bybit", "all"]:
+                if self.bybit_client:
+                    linear_tickers, linear_insts = self.bybit_client.get_linear_market_data()
+                    spot_tickers, spot_insts = self.bybit_client.get_spot_market_data()
+                    bybit_results = calc.match_and_calculate_bybit(
+                        linear_tickers, spot_tickers, linear_insts, spot_insts
+                    )
+                    results.extend(bybit_results)
+
+            # Sort combined results descending by hourly funding rate
+            results.sort(key=lambda x: x["hourly_funding"], reverse=True)
 
             payload = {
                 "status": "success",
+                "exchange": exchange,
                 "count": len(results),
                 "params": {
+                    "exchange": exchange,
                     "spot_fee_pct": spot_fee_pct,
                     "perp_fee_pct": perp_fee_pct,
                     "entry_fee_pct": spot_fee_pct + perp_fee_pct,
@@ -80,15 +414,17 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.wfile.write(err_bytes)
 
 def start_web_server(port: int, 
-                     client: HyperliquidClient, 
+                     hl_client: HyperliquidClient, 
+                     bybit_client: BybitClient,
                      calculator: FundingRateCalculator, 
                      interval: int):
-    ArbitrageServerHandler.client = client
+    ArbitrageServerHandler.hl_client = hl_client
+    ArbitrageServerHandler.bybit_client = bybit_client
     ArbitrageServerHandler.calculator = calculator
 
     server = HTTPServer(("0.0.0.0", port), ArbitrageServerHandler)
     print(f"===========================================================")
-    print(f"🔥 Hyperliquid Funding Rate Monitor Web Dashboard Live!")
+    print(f"🔥 Capital Funding Rate Arbitrage Monitor Web Dashboard Live!")
     print(f"👉 Access UI at: http://localhost:{port}")
     print(f"===========================================================")
 
@@ -97,3 +433,4 @@ def start_web_server(port: int,
     except KeyboardInterrupt:
         print("\nShutting down web server...")
         server.server_close()
+

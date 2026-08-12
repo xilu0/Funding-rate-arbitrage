@@ -52,3 +52,13 @@ class HyperliquidClient:
             asset_ctxs = res[1]
             return tokens, universe, asset_ctxs
         raise ValueError("Invalid response format for spotMetaAndAssetCtxs")
+
+    def get_l2_book(self, coin: str) -> Dict[str, Any]:
+        """
+        Fetches L2 Orderbook for a perpetual or spot coin on Hyperliquid.
+        Returns dict with 'levels': [bids, asks] where levels[0] is bids, levels[1] is asks.
+        """
+        res = self._post({"type": "l2Book", "coin": coin})
+        if isinstance(res, dict) and "levels" in res:
+            return res
+        return {"levels": [[], []]}

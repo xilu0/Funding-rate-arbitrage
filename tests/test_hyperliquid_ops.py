@@ -47,6 +47,20 @@ class TestHyperliquidClientEndpoints(unittest.TestCase):
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["address"], "0xagent123")
 
+    @patch.object(HyperliquidClient, '_post')
+    def test_get_funding_rate_history(self, mock_post):
+        mock_post.return_value = [
+            {"coin": "HYPE", "fundingRate": "0.0001", "premium": "0.0005", "time": 1784653200000}
+        ]
+        res = self.client.get_funding_rate_history("HYPE", start_time=1784650000000)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["coin"], "HYPE")
+        mock_post.assert_called_once_with({
+            "type": "fundingHistory",
+            "coin": "HYPE",
+            "startTime": 1784650000000
+        })
+
 
 class TestHyperliquidExecutor(unittest.TestCase):
     def setUp(self):

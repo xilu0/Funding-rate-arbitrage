@@ -221,6 +221,33 @@ class TestFundingRateCalculator(unittest.TestCase):
         self.assertAlmostEqual(stats["max_rate_pct"], 0.02)
         self.assertAlmostEqual(stats["min_rate_pct"], -0.01)
 
+    def test_calculate_funding_history_stats_hyperliquid(self):
+        # Hyperliquid format: 'coin', 'time' (1h interval: 3600000 ms)
+        raw_history = [
+            {"coin": "HYPE", "fundingRate": "0.00005", "time": 1700000000000},
+            {"coin": "HYPE", "fundingRate": "0.00010", "time": 1700003600000},
+            {"coin": "HYPE", "fundingRate": "-0.00002", "time": 1700007200000},
+        ]
+
+        hist = FundingRateCalculator.calculate_funding_history_stats(raw_history)
+
+        self.assertEqual(hist["symbol"], "HYPE")
+        self.assertEqual(hist["total_periods"], 3)
+        self.assertEqual(hist["funding_interval_hr"], 1.0)
+
+        stats = hist["stats"]
+        self.assertAlmostEqual(stats["cumulative_funding_pct"], 0.013)
+        self.assertEqual(stats["pos_count"], 2)
+        self.assertEqual(stats["neg_count"], 1)
+        self.assertAlmostEqual(stats["max_rate_pct"], 0.01)
+        self.assertAlmostEqual(stats["min_rate_pct"], -0.002)
+
+    def test_calculate_funding_history_stats_empty(self):
+        hist = FundingRateCalculator.calculate_funding_history_stats([])
+        self.assertEqual(hist["total_periods"], 0)
+        self.assertEqual(hist["records"], [])
+        self.assertEqual(hist["stats"], {})
+
     def test_maker_taker_fee_rates(self):
         # Hyperliquid fees: spot_taker=0.07%, perp_taker=0.035%, spot_maker=0.015%, perp_maker=0.015%
         calc = FundingRateCalculator(

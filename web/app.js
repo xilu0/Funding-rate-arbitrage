@@ -273,7 +273,7 @@ function renderTable() {
                 <td><span class="${paybackClass}">${paybackStr}</span></td>
                 <td>$${Math.round(item.perp_24h_volume).toLocaleString()}</td>
                 <td>
-                    <button class="btn-action" onclick="openHistoryModal('${item.coin}')">📊 历史</button>
+                    <button class="btn-action" onclick="openHistoryModal('${item.exchange}', '${item.coin}')">📊 历史</button>
                     <button class="btn-action btn-depth" onclick="openDepthModal('${item.exchange}', '${item.coin}', '${item.raw_spot_pair || item.spot_symbol}')">⚖️ 容量</button>
                     <button class="btn-action btn-build" onclick="openBuildModal('${item.exchange}', '${item.coin}', '${item.spot_symbol}', '${item.raw_spot_pair || ''}')">🚀 建仓</button>
                 </td>
@@ -443,6 +443,7 @@ function renderDepthCapacityUI(data) {
 // ----------------------------------------------------
 // History Modal & Analysis Logic
 // ----------------------------------------------------
+let currentHistoryExchange = "Bybit";
 let currentHistorySymbol = "";
 let currentHistoryDays = 30;
 
@@ -466,7 +467,7 @@ function initModalListeners() {
             e.target.classList.add("active");
             currentHistoryDays = parseInt(e.target.getAttribute("data-days"));
             if (currentHistorySymbol) {
-                fetchAndRenderHistory(currentHistorySymbol, currentHistoryDays);
+                fetchAndRenderHistory(currentHistoryExchange, currentHistorySymbol, currentHistoryDays);
             }
         });
     });
@@ -475,14 +476,17 @@ function initModalListeners() {
 // Attach modal listener on load
 document.addEventListener("DOMContentLoaded", initModalListeners);
 
-function openHistoryModal(symbol) {
+function openHistoryModal(exchange, symbol) {
+    currentHistoryExchange = exchange || "Bybit";
     currentHistorySymbol = symbol;
     const modal = document.getElementById("history-modal");
     document.getElementById("modal-title").textContent = `📊 ${symbol} 历史资金费率分析`;
-    document.getElementById("modal-subtitle").textContent = `Bybit Linear Perpetual Contract (${symbol})`;
+    const isHl = currentHistoryExchange.toLowerCase().includes("hyperliquid");
+    const exchDesc = isHl ? "Hyperliquid Perpetual Contract" : "Bybit Linear Perpetual Contract";
+    document.getElementById("modal-subtitle").textContent = `${exchDesc} (${symbol})`;
     
     modal.classList.remove("hidden");
-    fetchAndRenderHistory(symbol, currentHistoryDays);
+    fetchAndRenderHistory(currentHistoryExchange, currentHistorySymbol, currentHistoryDays);
 }
 
 function closeHistoryModal() {
@@ -490,25 +494,31 @@ function closeHistoryModal() {
     if (modal) modal.classList.add("hidden");
 }
 
-async function fetchAndRenderHistory(symbol, days) {
+async function fetchAndRenderHistory(exchange, symbol, days) {
     const tbody = document.getElementById("modal-table-body");
-    tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">正在获取 ${symbol} 历史资费明细...</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">正在获取 ${symbol} (${exchange || ''}) 历史资费明细...</td></tr>`;
 
     try {
-        const response = await fetch(`/api/bybit/funding-history?symbol=${symbol}&days=${days}`);
+        const exchParam = (exchange || "").toLowerCase().includes("hyperliquid") ? "hyperliquid" : "bybit";
+        const response = await fetch(`/api/funding-history?exchange=${exchParam}&symbol=${encodeURIComponent(symbol)}&days=${days}`);
         const json = await response.json();
 
-        if (json.status === "success" && json.data) {
+        if (json.status === "success" && json.data && json.data.total_periods > 0) {
             const data = json.data;
             renderModalStats(data);
             drawHistoryChart(data.records);
             renderModalTable(data.records);
+        } else if (json.status === "success" && json.data && json.data.total_periods === 0) {
+            renderModalStats(json.data);
+            drawHistoryChart([]);
+            tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">暂无该标的在选定时间范围内的历史资费数据</td></tr>`;
         } else {
-            tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">无该标的的历史数据或解析失败</td></tr>`;
+            const errMsg = json.message || "无该标的的历史数据或解析失败";
+            tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">${errMsg}</td></tr>`;
         }
     } catch (err) {
         console.error("Fetch history error:", err);
-        tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">网络请求失败</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">网络请求失败: ${err.message}</td></tr>`;
     }
 }
 
@@ -557,8 +567,8 @@ function drawHistoryChart(records) {
     const chartH = canvas.height - padding.top - padding.bottom;
 
     const rates = records.map(r => r.period_funding_pct);
-    let maxVal = Math.max(...rates, 0.001);
-    let minVal = Math.min(...rates, -0.001);
+    let maxVal = Math.max(...rates, 0.0001);
+    let minVal = Math.min(...rates, -0.0001);
     const maxAbs = Math.max(Math.abs(maxVal), Math.abs(minVal)) * 1.2;
 
     const zeroY = padding.top + chartH / 2;
@@ -581,20 +591,20 @@ function drawHistoryChart(records) {
     ctx.fillText(`+${maxAbs.toFixed(3)}%`, padding.left - 6, padding.top + 10);
     ctx.fillText(`-${maxAbs.toFixed(3)}%`, padding.left - 6, padding.top + chartH - 2);
 
-    // Bars
+    // Bars - adaptive bar width
     const stepX = chartW / records.length;
-    const barW = Math.max(2, stepX - 2);
+    const barW = Math.max(1, Math.min(12, stepX * 0.85));
 
     records.forEach((r, i) => {
         const val = r.period_funding_pct;
-        const x = padding.left + i * stepX + 1;
+        const x = padding.left + i * stepX;
         const barH = (Math.abs(val) / maxAbs) * (chartH / 2);
 
         ctx.fillStyle = val >= 0 ? "#10b981" : "#ef4444";
         if (val >= 0) {
-            ctx.fillRect(x, zeroY - barH, barW, barH);
+            ctx.fillRect(x, zeroY - barH, barW, Math.max(1, barH));
         } else {
-            ctx.fillRect(x, zeroY, barW, barH);
+            ctx.fillRect(x, zeroY, barW, Math.max(1, barH));
         }
     });
 }

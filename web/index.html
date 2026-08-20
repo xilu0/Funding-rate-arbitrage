@@ -336,6 +336,16 @@
             <div class="modal-body">
                 <!-- Sizing & Mode Picker Box -->
                 <div class="capital-simulator-box">
+                    <div class="execution-mode-picker">
+                        <span class="range-label">执行架构策略:</span>
+                        <label class="radio-label" title="现货买一挂单 (Post-Only Maker)，成交后毫秒级触发合约 IOC 开空，省下昂贵现货吃单费">
+                            <input type="radio" name="execution-mode" value="maker_taker" checked> ⚡ <b>Maker-Taker</b> (推荐: 现货挂单 + 合约毫秒对冲)
+                        </label>
+                        <label class="radio-label" title="现货与合约双边市价吃单 (Taker)，秒级锁定但承担双边 Taker 手续费与冲击滑点">
+                            <input type="radio" name="execution-mode" value="taker_taker"> 🚀 <b>Taker-Taker</b> (双边快速市价)
+                        </label>
+                    </div>
+
                     <div class="sizing-mode-picker">
                         <span class="range-label">建仓规格方式:</span>
                         <label class="radio-label">
@@ -361,6 +371,11 @@
                     </div>
                 </div>
 
+                <!-- Workflow & Savings Banner -->
+                <div id="build-workflow-banner" class="workflow-banner hidden">
+                    <!-- Populated dynamically in app.js -->
+                </div>
+
                 <!-- Risk Guard Banner -->
                 <div id="build-risk-banner" class="sim-banner banner-green">
                     <!-- Populated dynamically in app.js -->
@@ -373,19 +388,20 @@
                         <table class="data-table modal-data-table">
                             <thead>
                                 <tr>
-                                    <th>Leg 腿别</th>
+                                    <th>Leg 腿别 / 角色</th>
                                     <th>市场类型</th>
                                     <th>交易对</th>
                                     <th>方向</th>
-                                    <th>订单类型</th>
+                                    <th>订单类型 & TIF</th>
                                     <th>挂单数量</th>
-                                    <th>预计 VWAP 成交价</th>
+                                    <th>目标价格 (USD)</th>
                                     <th>滑点 (%)</th>
+                                    <th>手续费 (%)</th>
                                 </tr>
                             </thead>
                             <tbody id="build-table-body">
                                 <tr>
-                                    <td colspan="8" class="loading-cell">点击 [⚡ Try-Run 模拟演练] 生成建仓计划...</td>
+                                    <td colspan="9" class="loading-cell">点击 [⚡ Try-Run 模拟演练] 生成建仓计划...</td>
                                 </tr>
                             </tbody>
                         </table>

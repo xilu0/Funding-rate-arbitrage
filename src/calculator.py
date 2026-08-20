@@ -3,13 +3,19 @@ from typing import Dict, List, Any, Optional, Tuple
 
 DEFAULT_HL_SPOT_TAKER_FEE = 0.0007   # 0.07%
 DEFAULT_HL_PERP_TAKER_FEE = 0.00035  # 0.035%
+DEFAULT_HL_SPOT_MAKER_FEE = 0.00015  # 0.015%
+DEFAULT_HL_PERP_MAKER_FEE = 0.00015  # 0.015%
 
 DEFAULT_BYBIT_SPOT_TAKER_FEE = 0.0010  # 0.10%
 DEFAULT_BYBIT_PERP_TAKER_FEE = 0.00055 # 0.055%
+DEFAULT_BYBIT_SPOT_MAKER_FEE = 0.00020 # 0.02%
+DEFAULT_BYBIT_PERP_MAKER_FEE = 0.00020 # 0.02%
 
 # Backward compatibility defaults
 DEFAULT_SPOT_TAKER_FEE = DEFAULT_HL_SPOT_TAKER_FEE
 DEFAULT_PERP_TAKER_FEE = DEFAULT_HL_PERP_TAKER_FEE
+DEFAULT_SPOT_MAKER_FEE = DEFAULT_HL_SPOT_MAKER_FEE
+DEFAULT_PERP_MAKER_FEE = DEFAULT_HL_PERP_MAKER_FEE
 
 COMMON_PREFIX_ALIASES = {
     # Hyperliquid Unit Protocol Assets (U-prefix)
@@ -79,22 +85,43 @@ class FundingRateCalculator:
     def __init__(self, 
                  spot_taker_fee: float = DEFAULT_SPOT_TAKER_FEE, 
                  perp_taker_fee: float = DEFAULT_PERP_TAKER_FEE,
+                 spot_maker_fee: float = DEFAULT_SPOT_MAKER_FEE,
+                 perp_maker_fee: float = DEFAULT_PERP_MAKER_FEE,
                  enable_aliases: bool = True,
                  max_spread_pct: float = 15.0):
         self.spot_taker_fee = spot_taker_fee
         self.perp_taker_fee = perp_taker_fee
+        self.spot_maker_fee = spot_maker_fee
+        self.perp_maker_fee = perp_maker_fee
         self.enable_aliases = enable_aliases
         self.max_spread_pct = max_spread_pct
 
+    def get_entry_fee_rate(self, mode: str = "maker_taker") -> float:
+        """
+        Single-side entry fee rate based on execution mode:
+        - 'maker_taker': Spot Maker + Perp Taker (Recommended standard SOP)
+        - 'taker_taker': Spot Taker + Perp Taker (Fast market execution benchmark)
+        - 'maker_maker': Spot Maker + Perp Maker (Dual post-only)
+        """
+        if mode == "maker_taker":
+            return self.spot_maker_fee + self.perp_taker_fee
+        elif mode == "maker_maker":
+            return self.spot_maker_fee + self.perp_maker_fee
+        return self.spot_taker_fee + self.perp_taker_fee
+
+    def get_roundtrip_fee_rate(self, mode: str = "maker_taker") -> float:
+        """Full round-trip fee rate based on execution mode (Entry + Exit)."""
+        return self.get_entry_fee_rate(mode) * 2.0
+
     @property
     def entry_fee_rate(self) -> float:
-        """Single-side entry market order fee rate (Spot Taker + Perp Taker)."""
-        return self.spot_taker_fee + self.perp_taker_fee
+        """Single-side entry market order fee rate (Spot Taker + Perp Taker) for backward compatibility."""
+        return self.get_entry_fee_rate("taker_taker")
 
     @property
     def roundtrip_fee_rate(self) -> float:
-        """Full round-trip market order fee rate (Entry + Exit)."""
-        return self.entry_fee_rate * 2.0
+        """Full round-trip market order fee rate (Entry + Exit) for backward compatibility."""
+        return self.get_roundtrip_fee_rate("taker_taker")
 
     def calculate_payback_hours(self, fee_rate: float, hourly_rate: float) -> Optional[float]:
         """
@@ -409,35 +436,54 @@ class FundingRateCalculator:
     def calculate_funding_history_stats(history_records: list, days: Optional[int] = None) -> Dict[str, Any]:
         """
         Calculates comprehensive statistics for historical funding rate data.
+        Compatible with Bybit (fundingRateTimestamp, symbol) and Hyperliquid (time, coin).
         """
         import datetime
 
         if not history_records:
             return {
+                "symbol": "",
                 "total_periods": 0,
                 "days_requested": days,
+                "funding_interval_hr": 8.0,
                 "stats": {},
                 "records": []
             }
 
+        def _extract_ts(rec: Dict[str, Any]) -> float:
+            return safe_float(rec.get("fundingRateTimestamp") if "fundingRateTimestamp" in rec else rec.get("time"))
+
         # Sort chronologically (oldest to newest)
-        sorted_records = sorted(history_records, key=lambda x: safe_float(x.get("fundingRateTimestamp")))
+        sorted_records = sorted(history_records, key=_extract_ts)
 
         # Filter by days if requested
-        if days and days > 0:
-            latest_ts = safe_float(sorted_records[-1].get("fundingRateTimestamp"))
+        if days and days > 0 and sorted_records:
+            latest_ts = _extract_ts(sorted_records[-1])
             cutoff_ts = latest_ts - (days * 24 * 3600 * 1000)
-            filtered = [r for r in sorted_records if safe_float(r.get("fundingRateTimestamp")) >= cutoff_ts]
+            filtered = [r for r in sorted_records if _extract_ts(r) >= cutoff_ts]
             if filtered:
                 sorted_records = filtered
 
         total_periods = len(sorted_records)
+        if total_periods == 0:
+            return {
+                "symbol": "",
+                "total_periods": 0,
+                "days_requested": days,
+                "funding_interval_hr": 8.0,
+                "stats": {},
+                "records": []
+            }
+
+        symbol_name = sorted_records[0].get("symbol") or sorted_records[0].get("coin") or ""
 
         # Detect funding interval (hours)
-        interval_hr = 8.0
+        is_hl_format = ("time" in sorted_records[0] or "coin" in sorted_records[0])
+        interval_hr = 1.0 if is_hl_format else 8.0
+
         if total_periods >= 2:
-            ts0 = safe_float(sorted_records[0].get("fundingRateTimestamp"))
-            ts1 = safe_float(sorted_records[1].get("fundingRateTimestamp"))
+            ts0 = _extract_ts(sorted_records[0])
+            ts1 = _extract_ts(sorted_records[1])
             diff_ms = abs(ts1 - ts0)
             if diff_ms > 0:
                 detected = round(diff_ms / (3600.0 * 1000.0))
@@ -462,12 +508,12 @@ class FundingRateCalculator:
         min_idx = min(range(total_periods), key=lambda i: period_rates[i])
 
         max_rate_pct = period_rates[max_idx] * 100.0
-        max_ts = safe_float(sorted_records[max_idx].get("fundingRateTimestamp"))
-        max_dt_str = datetime.datetime.fromtimestamp(max_ts / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        max_ts = _extract_ts(sorted_records[max_idx])
+        max_dt_str = datetime.datetime.fromtimestamp(max_ts / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M") if max_ts > 0 else "--"
 
         min_rate_pct = period_rates[min_idx] * 100.0
-        min_ts = safe_float(sorted_records[min_idx].get("fundingRateTimestamp"))
-        min_dt_str = datetime.datetime.fromtimestamp(min_ts / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        min_ts = _extract_ts(sorted_records[min_idx])
+        min_dt_str = datetime.datetime.fromtimestamp(min_ts / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M") if min_ts > 0 else "--"
 
         # Counts
         pos_count = sum(1 for r in period_rates if r > 0)
@@ -486,8 +532,8 @@ class FundingRateCalculator:
         # Build formatted records
         formatted_records = []
         for r in sorted_records:
-            ts = safe_float(r.get("fundingRateTimestamp"))
-            dt_str = datetime.datetime.fromtimestamp(ts / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+            ts = _extract_ts(r)
+            dt_str = datetime.datetime.fromtimestamp(ts / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M") if ts > 0 else "--"
             p_rate = safe_float(r.get("fundingRate"))
             h_rate = p_rate / interval_hr
             formatted_records.append({
@@ -500,7 +546,7 @@ class FundingRateCalculator:
             })
 
         return {
-            "symbol": sorted_records[0].get("symbol", ""),
+            "symbol": symbol_name,
             "days_requested": days,
             "total_periods": total_periods,
             "funding_interval_hr": interval_hr,
@@ -573,9 +619,11 @@ class FundingRateCalculator:
                                   perp_bids: List[Tuple[float, float]],
                                   perp_mid_px: float,
                                   hourly_funding: float,
-                                  custom_target_usd: Optional[float] = None) -> Dict[str, Any]:
+                                  custom_target_usd: Optional[float] = None,
+                                  execution_mode: str = "maker_taker") -> Dict[str, Any]:
         """
         Evaluates capital capacity and orderbook slippage for Delta-neutral arbitrage.
+        Supports execution_mode: 'maker_taker' (Spot Maker + Perp Taker) or 'taker_taker' (Dual Taker).
         """
         is_positive_arbitrage = (hourly_funding >= 0)
         abs_hourly_funding = abs(hourly_funding)
@@ -586,9 +634,19 @@ class FundingRateCalculator:
         spot_levels = spot_asks if entry_spot_is_buy else spot_bids
         perp_levels = perp_bids if entry_spot_is_buy else perp_asks
 
-        spot_fee_pct = self.spot_taker_fee * 100.0
-        perp_fee_pct = self.perp_taker_fee * 100.0
+        if execution_mode == "maker_taker":
+            spot_fee_pct = self.spot_maker_fee * 100.0
+            perp_fee_pct = self.perp_taker_fee * 100.0
+        elif execution_mode == "maker_maker":
+            spot_fee_pct = self.spot_maker_fee * 100.0
+            perp_fee_pct = self.perp_maker_fee * 100.0
+        else:
+            spot_fee_pct = self.spot_taker_fee * 100.0
+            perp_fee_pct = self.perp_taker_fee * 100.0
+
         base_fee_pct = spot_fee_pct + perp_fee_pct
+        taker_taker_base_fee_pct = (self.spot_taker_fee + self.perp_taker_fee) * 100.0
+        fee_savings_pct = max(0.0, taker_taker_base_fee_pct - base_fee_pct)
 
         # Multi-scale position preset targets
         preset_targets = [1000, 5000, 10000, 25000, 50000, 100000, 250000, 500000]
@@ -603,10 +661,16 @@ class FundingRateCalculator:
             p_vwap, p_slip, p_depth = self.simulate_orderbook_walk(perp_levels, target_usd, entry_perp_is_buy, perp_mid_px)
 
             if s_vwap is not None and p_vwap is not None:
-                comb_slip = s_slip + p_slip
+                # In maker_taker mode, spot leg is a resting limit order (0.0% slippage vs spot mid)
+                effective_spot_slip = 0.0 if execution_mode in ["maker_taker", "maker_maker"] else s_slip
+                effective_perp_slip = 0.0 if execution_mode == "maker_maker" else p_slip
+                comb_slip = effective_spot_slip + effective_perp_slip
+
                 total_cost_pct = base_fee_pct + comb_slip
                 payback_hrs = self.calculate_payback_hours(total_cost_pct / 100.0, abs_hourly_funding)
                 payback_str = self.format_hours(payback_hrs)
+
+                fee_savings_usd = (fee_savings_pct / 100.0) * target_usd
 
                 if comb_slip <= 0.10:
                     status = "高度推荐 (极低滑点)"
@@ -620,11 +684,12 @@ class FundingRateCalculator:
                 simulations.append({
                     "target_usd": target_usd,
                     "spot_vwap": s_vwap,
-                    "spot_slippage_pct": s_slip,
+                    "spot_slippage_pct": effective_spot_slip,
                     "perp_vwap": p_vwap,
-                    "perp_slippage_pct": p_slip,
+                    "perp_slippage_pct": effective_perp_slip,
                     "combined_slippage_pct": comb_slip,
                     "total_cost_pct": total_cost_pct,
+                    "fee_savings_usd": fee_savings_usd,
                     "payback_hrs": payback_hrs,
                     "payback_str": payback_str,
                     "status": status,
@@ -639,6 +704,7 @@ class FundingRateCalculator:
                     "perp_slippage_pct": p_slip,
                     "combined_slippage_pct": None,
                     "total_cost_pct": None,
+                    "fee_savings_usd": None,
                     "payback_hrs": None,
                     "payback_str": "深度不足",
                     "status": "超出盘口深度",
@@ -647,16 +713,15 @@ class FundingRateCalculator:
 
         # Calculate max capacity C_max for 0.1%, 0.2%, 0.5% slippage and 24h payback
         def find_max_capacity(check_fn) -> float:
-            low = 100.0
-            high = 1000000.0
             best = 0.0
-
             # Test coarse steps first
             for usd in range(1000, 1000000, 1000):
                 s_vwap, s_slip, _ = self.simulate_orderbook_walk(spot_levels, float(usd), entry_spot_is_buy, spot_mid_px)
                 p_vwap, p_slip, _ = self.simulate_orderbook_walk(perp_levels, float(usd), entry_perp_is_buy, perp_mid_px)
                 if s_vwap is not None and p_vwap is not None:
-                    comb_slip = s_slip + p_slip
+                    effective_spot_slip = 0.0 if execution_mode in ["maker_taker", "maker_maker"] else s_slip
+                    effective_perp_slip = 0.0 if execution_mode == "maker_maker" else p_slip
+                    comb_slip = effective_spot_slip + effective_perp_slip
                     total_cost_pct = base_fee_pct + comb_slip
                     payback_hrs = self.calculate_payback_hours(total_cost_pct / 100.0, abs_hourly_funding)
                     if check_fn(comb_slip, payback_hrs):
@@ -678,6 +743,7 @@ class FundingRateCalculator:
             custom_sim = next((s for s in simulations if s["target_usd"] == custom_target_usd), None)
 
         return {
+            "execution_mode": execution_mode,
             "is_positive_arbitrage": is_positive_arbitrage,
             "hourly_funding": hourly_funding,
             "hourly_funding_pct": hourly_funding * 100.0,
@@ -685,6 +751,8 @@ class FundingRateCalculator:
                 "spot_fee_pct": spot_fee_pct,
                 "perp_fee_pct": perp_fee_pct,
                 "base_fee_pct": base_fee_pct,
+                "fee_savings_pct": fee_savings_pct,
+                "taker_taker_base_fee_pct": taker_taker_base_fee_pct,
             },
             "mid_prices": {
                 "spot_mid_px": spot_mid_px,

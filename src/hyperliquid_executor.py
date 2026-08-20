@@ -522,3 +522,78 @@ class HyperliquidExecutor:
             "total_orders": len(open_orders),
             "results": results
         }
+
+    def build_maker_taker_order_plan(self,
+                                     coin: str,
+                                     spot_pair: str,
+                                     target_usd: float,
+                                     spot_price: float,
+                                     perp_price: float,
+                                     multiplier: float = 1.0,
+                                     execution_mode: str = "maker_taker") -> Dict[str, Any]:
+        """
+        Builds a structured Maker-Taker order plan for Hyperliquid:
+        - Leg 1 (Spot): Post-Only Limit Order ('Alo' / Add Liquidity Only) at best bid.
+        - Leg 2 (Perp): IOC / Market order triggered on spot fill.
+        """
+        spot_qty = target_usd / spot_price if spot_price > 0 else 0.0
+        perp_qty = spot_qty / multiplier if multiplier > 0 else spot_qty
+
+        if execution_mode == "maker_taker":
+            spot_fee_rate = self.calc.spot_maker_fee
+            perp_fee_rate = self.calc.perp_taker_fee
+            spot_order_type = {"limit": {"tif": "Alo"}} # Post-Only Maker
+            perp_order_type = {"limit": {"tif": "Ioc"}} # Taker IOC on trigger
+            workflow_desc = "【Hyperliquid Maker-Taker 架构】先在现货端挂 Alo (Post-Only) 买单，等待对手方吃单；成交后毫秒级在合约端以 IOC/Market 市价开出等量空头对冲，节省 0.055% 现货吃单手续费。"
+        elif execution_mode == "maker_maker":
+            spot_fee_rate = self.calc.spot_maker_fee
+            perp_fee_rate = self.calc.perp_maker_fee
+            spot_order_type = {"limit": {"tif": "Alo"}}
+            perp_order_type = {"limit": {"tif": "Alo"}}
+            workflow_desc = "【Hyperliquid 双边 Alo 挂单】现货与合约两端均使用 Alo 纯挂单。"
+        else: # taker_taker
+            spot_fee_rate = self.calc.spot_taker_fee
+            perp_fee_rate = self.calc.perp_taker_fee
+            spot_order_type = {"limit": {"tif": "Ioc"}}
+            perp_order_type = {"limit": {"tif": "Ioc"}}
+            workflow_desc = "【Hyperliquid 双边 Taker 市价】现货与合约双边以 IOC 快速市价成交。"
+
+        base_fee_pct = (spot_fee_rate + perp_fee_rate) * 100.0
+        taker_taker_base_fee = (self.calc.spot_taker_fee + self.calc.perp_taker_fee) * 100.0
+        fee_savings_pct = max(0.0, taker_taker_base_fee - base_fee_pct)
+        fee_savings_usd = (fee_savings_pct / 100.0) * target_usd
+
+        return {
+            "execution_mode": execution_mode,
+            "workflow_desc": workflow_desc,
+            "coin": coin,
+            "spot_pair": spot_pair,
+            "target_usd": target_usd,
+            "spot_qty": spot_qty,
+            "perp_qty": perp_qty,
+            "multiplier": multiplier,
+            "spot_order": {
+                "coin": spot_pair,
+                "is_buy": True,
+                "sz": spot_qty,
+                "limit_px": spot_price,
+                "order_type": spot_order_type,
+                "role": "Trigger Leg (现货买一挂单)",
+                "fee_pct": spot_fee_rate * 100.0
+            },
+            "perp_order": {
+                "coin": coin,
+                "is_buy": False,
+                "sz": perp_qty,
+                "limit_px": perp_price,
+                "order_type": perp_order_type,
+                "role": "Hedge Leg (成交毫秒对冲)",
+                "fee_pct": perp_fee_rate * 100.0
+            },
+            "fee_summary": {
+                "base_fee_pct": base_fee_pct,
+                "fee_savings_pct": fee_savings_pct,
+                "fee_savings_usd": fee_savings_usd,
+                "taker_taker_base_fee_pct": taker_taker_base_fee
+            }
+        }

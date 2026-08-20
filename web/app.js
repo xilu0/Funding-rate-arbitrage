@@ -647,6 +647,7 @@ function initBuildModalListeners() {
     const closeBtn = document.getElementById("build-modal-close-btn");
     const tryRunBtn = document.getElementById("btn-run-tryrun");
     const modeRadios = document.querySelectorAll("input[name='sizing-mode']");
+    const execRadios = document.querySelectorAll("input[name='execution-mode']");
 
     if (closeBtn) closeBtn.addEventListener("click", closeBuildModal);
     if (modal) {
@@ -660,6 +661,12 @@ function initBuildModalListeners() {
             const isUsd = e.target.value === "usd";
             document.getElementById("build-input-label").textContent = isUsd ? "目标建仓金额 (USD):" : "目标建仓 Token 数量:";
             document.getElementById("build-amount-input").placeholder = isUsd ? "例如 10000" : "例如 1000000";
+        });
+    });
+
+    execRadios.forEach(radio => {
+        radio.addEventListener("change", () => {
+            fetchAndRenderBuildTryRun();
         });
     });
 
@@ -695,14 +702,17 @@ function closeBuildModal() {
 async function fetchAndRenderBuildTryRun() {
     const tbody = document.getElementById("build-table-body");
     const banner = document.getElementById("build-risk-banner");
-    tbody.innerHTML = `<tr><td colspan="8" class="loading-cell">正在进行 Try-Run 模拟演练并分析风控卡口...</td></tr>`;
+    const workflowBanner = document.getElementById("build-workflow-banner");
+    tbody.innerHTML = `<tr><td colspan="9" class="loading-cell">正在进行 Try-Run 模拟演练并分析风控卡口...</td></tr>`;
 
     const isUsd = document.querySelector("input[name='sizing-mode']:checked").value === "usd";
+    const execModeRadio = document.querySelector("input[name='execution-mode']:checked");
+    const execMode = execModeRadio ? execModeRadio.value : "maker_taker";
     const amountVal = parseFloat(document.getElementById("build-amount-input").value) || 10000;
     const force = document.getElementById("chk-force-override").checked;
 
     const exchParam = currentBuildExchange.toLowerCase().includes("hyperliquid") ? "hyperliquid" : "bybit";
-    let url = `/api/build-arbitrage?exchange=${exchParam}&symbol=${currentBuildSymbol}&spot_symbol=${currentBuildSpotSymbol}&raw_spot_pair=${currentBuildRawSpotPair}&dry_run=true&force=${force}`;
+    let url = `/api/build-arbitrage?exchange=${exchParam}&symbol=${currentBuildSymbol}&spot_symbol=${currentBuildSpotSymbol}&raw_spot_pair=${currentBuildRawSpotPair}&dry_run=true&force=${force}&execution_mode=${execMode}`;
     if (isUsd) {
         url += `&amount_usd=${amountVal}`;
     } else {
@@ -716,6 +726,24 @@ async function fetchAndRenderBuildTryRun() {
         if (json.status === "success" && json.try_run_plan) {
             const plan = json.try_run_plan;
             const risk = plan.risk_guard || {};
+
+            // Render Workflow & Savings Banner
+            if (workflowBanner) {
+                workflowBanner.classList.remove("hidden");
+                const savingsHtml = (plan.fee_savings_pct && plan.fee_savings_pct > 0)
+                    ? `<span class="savings-tag">💰 节省手续费: +${plan.fee_savings_pct.toFixed(3)}% (约 $${(plan.fee_savings_usd || 0).toFixed(2)})</span>`
+                    : `<span class="savings-tag" style="background:rgba(255,255,255,0.08); color:#94a3b8; border-color:transparent;">基准全 Taker 摩擦</span>`;
+
+                workflowBanner.innerHTML = `
+                    <div class="workflow-header">
+                        <span>⚙️ 策略架构: <b>${execMode === 'maker_taker' ? 'Maker-Taker 触发式对冲' : 'Taker-Taker 全市价快速开仓'}</b></span>
+                        ${savingsHtml}
+                    </div>
+                    <div style="font-size:12px; color:var(--text-secondary); line-height:1.4;">
+                        ${plan.workflow_desc || ''}
+                    </div>
+                `;
+            }
 
             // Render Risk Banner
             if (risk.decision === "PASSED") {
@@ -737,26 +765,31 @@ async function fetchAndRenderBuildTryRun() {
             orders.forEach(order => {
                 const slip = order.slippage_pct;
                 const slipStr = slip !== null ? `+${slip.toFixed(4)}%` : "-";
+                const feeStr = order.fee_pct !== undefined ? `${order.fee_pct.toFixed(3)}%` : "-";
+                const roleBadge = order.role ? `<br><span style="font-size:10px; color:#94a3b8; font-weight:normal;">${order.role}</span>` : "";
+                const tifStr = order.time_in_force ? ` <span style="font-size:10px; opacity:0.75;">(${order.time_in_force})</span>` : "";
+
                 html += `
                     <tr>
-                        <td style="font-weight:700; color:var(--accent-cyan);">${order.leg}</td>
+                        <td style="font-weight:700; color:var(--accent-cyan);">${order.leg}${roleBadge}</td>
                         <td><span class="exchange-badge exchange-hl">${order.category.toUpperCase()}</span></td>
                         <td style="font-weight:600;">${order.symbol}</td>
                         <td style="font-weight:700; color:${order.side === 'Buy' ? '#10b981' : '#ef4444'};">${order.side}</td>
-                        <td>${order.order_type}</td>
+                        <td><b>${order.order_type}</b>${tifStr}</td>
                         <td style="font-family:var(--font-mono); font-weight:600;">${order.quantity_str}</td>
-                        <td style="font-family:var(--font-mono);">$${formatPrice(order.expected_vwap)}</td>
+                        <td style="font-family:var(--font-mono);">$${formatPrice(order.target_price || order.expected_vwap)}</td>
                         <td><span class="badge-rate ${slip <= 0.2 ? 'rate-positive' : ''}">${slipStr}</span></td>
+                        <td style="font-family:var(--font-mono); color:#38bdf8;">${feeStr}</td>
                     </tr>
                 `;
             });
             tbody.innerHTML = html;
         } else {
-            tbody.innerHTML = `<tr><td colspan="8" class="loading-cell">无法生成 Try-Run 演练计划</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="9" class="loading-cell">无法生成 Try-Run 演练计划</td></tr>`;
         }
     } catch (err) {
         console.error("Fetch build try-run error:", err);
-        tbody.innerHTML = `<tr><td colspan="8" class="loading-cell">网络请求失败</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="loading-cell">网络请求失败</td></tr>`;
     }
 }
 

@@ -31,8 +31,8 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/funding-rates":
             self.handle_api_funding_rates(parsed.query)
-        elif path == "/api/bybit/funding-history":
-            self.handle_api_bybit_funding_history(parsed.query)
+        elif path in ["/api/funding-history", "/api/bybit/funding-history", "/api/hyperliquid/funding-history"]:
+            self.handle_api_funding_history(parsed.query, requested_path=path)
         elif path == "/api/depth-capacity":
             self.handle_api_depth_capacity(parsed.query)
         elif path in ["/api/build-arbitrage", "/api/bybit/build-arbitrage"]:
@@ -53,6 +53,9 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
         force = params.get("force", ["false"])[0].lower() == "true"
         max_slippage_str = params.get("max_slippage", ["0.50"])[0].strip()
         max_payback_str = params.get("max_payback", ["72.0"])[0].strip()
+        execution_mode = params.get("execution_mode", ["maker_taker"])[0].lower()
+        if execution_mode not in ["maker_taker", "taker_taker", "maker_maker"]:
+            execution_mode = "maker_taker"
 
         try:
             amount_usd = float(amount_usd_str) if amount_usd_str else None
@@ -79,7 +82,13 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
 
         try:
             from src.bybit_executor import BybitArbitrageExecutor
-            from src.calculator import parse_base_multiplier, safe_float
+            from src.calculator import (
+                DEFAULT_HL_SPOT_TAKER_FEE, DEFAULT_HL_PERP_TAKER_FEE,
+                DEFAULT_HL_SPOT_MAKER_FEE, DEFAULT_HL_PERP_MAKER_FEE,
+                DEFAULT_BYBIT_SPOT_TAKER_FEE, DEFAULT_BYBIT_PERP_TAKER_FEE,
+                DEFAULT_BYBIT_SPOT_MAKER_FEE, DEFAULT_BYBIT_PERP_MAKER_FEE,
+                parse_base_multiplier, safe_float
+            )
 
             # Determine exchange if not explicit
             is_hl = exchange == "hyperliquid" or (not exchange and not symbol.endswith("USDT") and not symbol.endswith("USDC"))
@@ -90,7 +99,9 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
 
                 calc = self.calculator or FundingRateCalculator(
                     spot_taker_fee=DEFAULT_HL_SPOT_TAKER_FEE,
-                    perp_taker_fee=DEFAULT_HL_PERP_TAKER_FEE
+                    perp_taker_fee=DEFAULT_HL_PERP_TAKER_FEE,
+                    spot_maker_fee=DEFAULT_HL_SPOT_MAKER_FEE,
+                    perp_maker_fee=DEFAULT_HL_PERP_MAKER_FEE
                 )
 
                 executor = BybitArbitrageExecutor(
@@ -174,13 +185,15 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
                     perp_mid_px=perp_mid_px,
                     max_slippage_pct=max_slippage,
                     max_payback_hours=max_payback,
-                    force=force
+                    force=force,
+                    execution_mode=execution_mode
                 )
 
                 payload = {
                     "status": "success",
                     "exchange": "Hyperliquid",
                     "mode": "DRY_RUN" if dry_run else "LIVE",
+                    "execution_mode": execution_mode,
                     "symbol": symbol,
                     "spot_symbol": display_spot_sym,
                     "size_info": size_info,
@@ -194,7 +207,9 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
 
                 calc = self.calculator or FundingRateCalculator(
                     spot_taker_fee=DEFAULT_BYBIT_SPOT_TAKER_FEE,
-                    perp_taker_fee=DEFAULT_BYBIT_PERP_TAKER_FEE
+                    perp_taker_fee=DEFAULT_BYBIT_PERP_TAKER_FEE,
+                    spot_maker_fee=DEFAULT_BYBIT_SPOT_MAKER_FEE,
+                    perp_maker_fee=DEFAULT_BYBIT_PERP_MAKER_FEE
                 )
 
                 executor = BybitArbitrageExecutor(
@@ -259,13 +274,15 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
                     perp_mid_px=perp_mid_px,
                     max_slippage_pct=max_slippage,
                     max_payback_hours=max_payback,
-                    force=force
+                    force=force,
+                    execution_mode=execution_mode
                 )
 
                 payload = {
                     "status": "success",
                     "exchange": "Bybit",
                     "mode": "DRY_RUN" if dry_run else "LIVE",
+                    "execution_mode": execution_mode,
                     "symbol": symbol,
                     "spot_symbol": calc_spot_symbol,
                     "size_info": size_info,
@@ -302,14 +319,23 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             except ValueError:
                 pass
 
+        execution_mode = params.get("execution_mode", ["maker_taker"])[0].lower()
+        if execution_mode not in ["maker_taker", "taker_taker", "maker_maker"]:
+            execution_mode = "maker_taker"
+
         default_spot_fee = 0.10 if exchange == "bybit" else 0.07
         default_perp_fee = 0.055 if exchange == "bybit" else 0.035
         spot_fee_pct = float(params.get("spot_fee", [default_spot_fee])[0])
         perp_fee_pct = float(params.get("perp_fee", [default_perp_fee])[0])
 
+        default_spot_maker = 0.02 if exchange == "bybit" else 0.015
+        default_perp_maker = 0.02 if exchange == "bybit" else 0.015
+
         calc = FundingRateCalculator(
             spot_taker_fee=spot_fee_pct / 100.0,
-            perp_taker_fee=perp_fee_pct / 100.0
+            perp_taker_fee=perp_fee_pct / 100.0,
+            spot_maker_fee=default_spot_maker / 100.0,
+            perp_maker_fee=default_perp_maker / 100.0
         )
 
         try:
@@ -386,7 +412,8 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
                 perp_bids=perp_bids,
                 perp_mid_px=perp_mid_px,
                 hourly_funding=hourly_funding,
-                custom_target_usd=custom_target_usd
+                custom_target_usd=custom_target_usd,
+                execution_mode=execution_mode
             )
 
             payload = {
@@ -413,11 +440,13 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.wfile.write(err_bytes)
 
 
-    def handle_api_bybit_funding_history(self, query_str: str):
+    def handle_api_funding_history(self, query_str: str, requested_path: str = "/api/funding-history"):
+        import time
         params = urllib.parse.parse_qs(query_str)
+        exchange = params.get("exchange", [""])[0].strip().lower()
         symbol = params.get("symbol", ["BTCUSDT"])[0].strip()
         days_str = params.get("days", ["30"])[0].strip()
-        limit_str = params.get("limit", ["200"])[0].strip()
+        limit_str = params.get("limit", ["500"])[0].strip()
 
         try:
             days = int(days_str) if days_str else 30
@@ -425,20 +454,57 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             days = 30
 
         try:
-            limit = int(limit_str) if limit_str else 200
+            limit = int(limit_str) if limit_str else 500
         except ValueError:
-            limit = 200
+            limit = 500
+
+        # Auto-detect exchange if not specified
+        if not exchange:
+            if "hyperliquid" in requested_path:
+                exchange = "hyperliquid"
+            elif "bybit" in requested_path:
+                exchange = "bybit"
+            elif symbol.endswith("USDT") or symbol.endswith("USDC") or symbol.endswith("PERP"):
+                exchange = "bybit"
+            else:
+                exchange = "hyperliquid"
 
         try:
-            if not self.bybit_client:
-                self.bybit_client = BybitClient()
+            if exchange in ["hyperliquid", "hl"]:
+                if not self.hl_client:
+                    self.hl_client = HyperliquidClient()
 
-            raw_history = self.bybit_client.get_funding_rate_history(symbol, limit=limit)
-            result_payload = FundingRateCalculator.calculate_funding_history_stats(raw_history, days=days)
+                start_time = int((time.time() - days * 86400) * 1000) if (days and days > 0) else 0
+                raw_history = self.hl_client.get_funding_rate_history(symbol, start_time=start_time)
+                result_payload = FundingRateCalculator.calculate_funding_history_stats(raw_history, days=days)
+                resp_exchange = "Hyperliquid"
+                resp_symbol = symbol
+            else:
+                # Bybit
+                if not self.bybit_client:
+                    self.bybit_client = BybitClient()
+
+                # Normalize Bybit symbol (e.g. BTC -> BTCUSDT, 1000PEPE -> 1000PEPEUSDT)
+                bybit_symbol = symbol
+                if not bybit_symbol.endswith("USDT") and not bybit_symbol.endswith("USDC") and not bybit_symbol.endswith("PERP"):
+                    bybit_symbol = f"{symbol}USDT"
+
+                bybit_limit = min(limit, 200)
+                try:
+                    raw_history = self.bybit_client.get_funding_rate_history(bybit_symbol, limit=bybit_limit)
+                    resp_symbol = bybit_symbol
+                except Exception:
+                    # Fallback to original symbol if appending USDT failed
+                    raw_history = self.bybit_client.get_funding_rate_history(symbol, limit=bybit_limit)
+                    resp_symbol = symbol
+
+                result_payload = FundingRateCalculator.calculate_funding_history_stats(raw_history, days=days)
+                resp_exchange = "Bybit"
 
             payload = {
                 "status": "success",
-                "symbol": symbol,
+                "exchange": resp_exchange,
+                "symbol": resp_symbol,
                 "data": result_payload
             }
 
@@ -450,10 +516,11 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(response_bytes)
         except Exception as e:
-            err_payload = {"status": "error", "message": str(e)}
+            err_payload = {"status": "error", "exchange": exchange, "symbol": symbol, "message": str(e)}
             err_bytes = json.dumps(err_payload).encode("utf-8")
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(err_bytes)
 

@@ -221,7 +221,74 @@ class TestFundingRateCalculator(unittest.TestCase):
         self.assertAlmostEqual(stats["max_rate_pct"], 0.02)
         self.assertAlmostEqual(stats["min_rate_pct"], -0.01)
 
+    def test_maker_taker_fee_rates(self):
+        # Hyperliquid fees: spot_taker=0.07%, perp_taker=0.035%, spot_maker=0.015%, perp_maker=0.015%
+        calc = FundingRateCalculator(
+            spot_taker_fee=0.0007,
+            perp_taker_fee=0.00035,
+            spot_maker_fee=0.00015,
+            perp_maker_fee=0.00015
+        )
+        # Maker-Taker: Spot Maker (0.015%) + Perp Taker (0.035%) = 0.050% = 0.00050
+        self.assertAlmostEqual(calc.get_entry_fee_rate("maker_taker"), 0.00050)
+        self.assertAlmostEqual(calc.get_roundtrip_fee_rate("maker_taker"), 0.00100)
+
+        # Taker-Taker: Spot Taker (0.070%) + Perp Taker (0.035%) = 0.105% = 0.00105
+        self.assertAlmostEqual(calc.get_entry_fee_rate("taker_taker"), 0.00105)
+        self.assertAlmostEqual(calc.get_roundtrip_fee_rate("taker_taker"), 0.00210)
+
+        # Maker-Maker: Spot Maker (0.015%) + Perp Maker (0.015%) = 0.030% = 0.00030
+        self.assertAlmostEqual(calc.get_entry_fee_rate("maker_maker"), 0.00030)
+        self.assertAlmostEqual(calc.get_roundtrip_fee_rate("maker_maker"), 0.00060)
+
+    def test_evaluate_capital_capacity_modes(self):
+        calc = FundingRateCalculator(
+            spot_taker_fee=0.0007,
+            perp_taker_fee=0.00035,
+            spot_maker_fee=0.00015,
+            perp_maker_fee=0.00015
+        )
+        spot_asks = [(100.0, 100.0), (101.0, 100.0)]
+        spot_bids = [(99.0, 100.0), (98.0, 100.0)]
+        perp_asks = [(100.0, 100.0), (101.0, 100.0)]
+        perp_bids = [(99.0, 100.0), (98.0, 100.0)]
+
+        # Mode: maker_taker
+        res_mt = calc.evaluate_capital_capacity(
+            spot_asks=spot_asks,
+            spot_bids=spot_bids,
+            spot_mid_px=99.5,
+            perp_asks=perp_asks,
+            perp_bids=perp_bids,
+            perp_mid_px=99.5,
+            hourly_funding=0.0001,
+            custom_target_usd=5000.0,
+            execution_mode="maker_taker"
+        )
+        self.assertEqual(res_mt["execution_mode"], "maker_taker")
+        self.assertAlmostEqual(res_mt["fees"]["base_fee_pct"], 0.050)
+        self.assertAlmostEqual(res_mt["fees"]["fee_savings_pct"], 0.055)
+        self.assertIsNotNone(res_mt["custom_simulation"])
+        self.assertAlmostEqual(res_mt["custom_simulation"]["fee_savings_usd"], 2.75) # 0.055% of $5000 = $2.75
+
+        # Mode: taker_taker
+        res_tt = calc.evaluate_capital_capacity(
+            spot_asks=spot_asks,
+            spot_bids=spot_bids,
+            spot_mid_px=99.5,
+            perp_asks=perp_asks,
+            perp_bids=perp_bids,
+            perp_mid_px=99.5,
+            hourly_funding=0.0001,
+            custom_target_usd=5000.0,
+            execution_mode="taker_taker"
+        )
+        self.assertEqual(res_tt["execution_mode"], "taker_taker")
+        self.assertAlmostEqual(res_tt["fees"]["base_fee_pct"], 0.105)
+        self.assertAlmostEqual(res_tt["fees"]["fee_savings_pct"], 0.0)
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

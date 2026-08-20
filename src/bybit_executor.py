@@ -137,9 +137,13 @@ class BybitArbitrageExecutor:
                               perp_mid_px: float,
                               max_slippage_pct: Optional[float] = None,
                               max_payback_hours: Optional[float] = None,
-                              force: bool = False) -> Dict[str, Any]:
+                              force: bool = False,
+                              execution_mode: str = "maker_taker") -> Dict[str, Any]:
         """
         Generates structured Try-Run simulation plan & risk report.
+        Supports execution_mode:
+        - 'maker_taker': Spot Maker (Post-Only) + Perp Taker (Trigger on Fill) - Recommended SOP
+        - 'taker_taker': Dual Market Taker (Fast entry benchmark)
         """
         is_positive = (hourly_funding >= 0)
         spot_is_buy = is_positive
@@ -152,9 +156,29 @@ class BybitArbitrageExecutor:
         p_vwap, p_slip, p_depth = self.calc.simulate_orderbook_walk(perp_levels, target_usd, perp_is_buy, perp_mid_px)
 
         exceeds_depth = (s_vwap is None or p_vwap is None)
-        comb_slip = (s_slip + p_slip) if not exceeds_depth else None
 
-        base_fee_pct = (self.calc.spot_taker_fee + self.calc.perp_taker_fee) * 100.0
+        if execution_mode == "maker_taker":
+            spot_fee_pct = self.calc.spot_maker_fee * 100.0
+            perp_fee_pct = self.calc.perp_taker_fee * 100.0
+            effective_spot_slip = 0.0
+            effective_perp_slip = p_slip if p_slip is not None else 0.0
+        elif execution_mode == "maker_maker":
+            spot_fee_pct = self.calc.spot_maker_fee * 100.0
+            perp_fee_pct = self.calc.perp_maker_fee * 100.0
+            effective_spot_slip = 0.0
+            effective_perp_slip = 0.0
+        else: # taker_taker
+            spot_fee_pct = self.calc.spot_taker_fee * 100.0
+            perp_fee_pct = self.calc.perp_taker_fee * 100.0
+            effective_spot_slip = s_slip if s_slip is not None else 0.0
+            effective_perp_slip = p_slip if p_slip is not None else 0.0
+
+        base_fee_pct = spot_fee_pct + perp_fee_pct
+        taker_taker_base_fee = (self.calc.spot_taker_fee + self.calc.perp_taker_fee) * 100.0
+        fee_savings_pct = max(0.0, taker_taker_base_fee - base_fee_pct)
+        fee_savings_usd = (fee_savings_pct / 100.0) * target_usd
+
+        comb_slip = (effective_spot_slip + effective_perp_slip) if not exceeds_depth else None
         total_cost_pct = (base_fee_pct + comb_slip) if comb_slip is not None else None
 
         payback_hrs = self.calc.calculate_payback_hours(total_cost_pct / 100.0, abs(hourly_funding)) if total_cost_pct else None
@@ -174,17 +198,63 @@ class BybitArbitrageExecutor:
 
         margin_required_usd = target_usd
 
+        # Calculate best prices for Maker orders
+        best_spot_bid = spot_bids[0][0] if spot_bids else spot_mid_px
+        best_spot_ask = spot_asks[0][0] if spot_asks else spot_mid_px
+        spot_maker_px = best_spot_bid if spot_is_buy else best_spot_ask
+
+        if execution_mode == "maker_taker":
+            spot_order_type = "Limit (Post-Only / Maker)"
+            spot_expected_px = spot_maker_px
+            spot_role = "Trigger Leg (主动买一挂单)"
+            spot_tif = "PostOnly"
+
+            perp_order_type = "Market / IOC (Taker)"
+            perp_expected_px = p_vwap or perp_mid_px
+            perp_role = "Hedge Leg (成交毫秒对冲)"
+            perp_tif = "IOC"
+            workflow_desc = "【Maker-Taker 触发对冲架构】第 1 步在现货买一价挂 Post-Only 限价单；第 2 步监听到现货成交事件后，毫秒级在合约端以 IOC/Market 市价开出等量空头对冲，省下昂贵的现货吃单费率与滑点，零单腿暴跌风险。"
+        elif execution_mode == "maker_maker":
+            spot_order_type = "Limit (Post-Only / Maker)"
+            spot_expected_px = spot_maker_px
+            spot_role = "Trigger Leg (主动挂单)"
+            spot_tif = "PostOnly"
+
+            best_perp_bid = perp_bids[0][0] if perp_bids else perp_mid_px
+            best_perp_ask = perp_asks[0][0] if perp_asks else perp_mid_px
+            perp_maker_px = best_perp_ask if spot_is_buy else best_perp_bid
+            perp_order_type = "Limit (Post-Only / Maker)"
+            perp_expected_px = perp_maker_px
+            perp_role = "Passive Hedge (双边挂单)"
+            perp_tif = "PostOnly"
+            workflow_desc = "【双边 Maker 极低费率】现货与合约两端同时挂 Post-Only 挂单，享受最高手续费返还，但存在部分成交未对冲的单腿风险。"
+        else: # taker_taker
+            spot_order_type = "Market (Taker)"
+            spot_expected_px = s_vwap or spot_mid_px
+            spot_role = "Leg 1 (现货市价吃单)"
+            spot_tif = "IOC"
+
+            perp_order_type = "Market (Taker)"
+            perp_expected_px = p_vwap or perp_mid_px
+            perp_role = "Leg 2 (合约市价吃单)"
+            perp_tif = "IOC"
+            workflow_desc = "【双边 Taker 快速市价】现货与合约双边同时发出市价单，秒级完成建仓锁定 Delta 中性，承担双边 Taker 手续费与盘口冲击滑点。"
+
         orders_plan = [
             {
                 "leg": "Spot Leg (现货)",
                 "category": "spot",
                 "symbol": spot_symbol,
                 "side": "Buy" if spot_is_buy else "Sell",
-                "order_type": "Market",
+                "order_type": spot_order_type,
+                "role": spot_role,
+                "time_in_force": spot_tif,
+                "target_price": spot_expected_px,
                 "quantity": spot_qty,
-                "quantity_str": f"{spot_qty:,.4f} {spot_symbol.replace('USDT', '')}",
-                "expected_vwap": s_vwap,
-                "slippage_pct": s_slip,
+                "quantity_str": f"{spot_qty:,.4f} {spot_symbol.replace('USDT', '').replace('USDC', '').replace('@', '')}",
+                "expected_vwap": spot_expected_px,
+                "slippage_pct": effective_spot_slip,
+                "fee_pct": spot_fee_pct,
                 "usd_value": target_usd
             },
             {
@@ -192,16 +262,22 @@ class BybitArbitrageExecutor:
                 "category": "linear",
                 "symbol": symbol,
                 "side": "Sell" if spot_is_buy else "Buy",
-                "order_type": "Market",
+                "order_type": perp_order_type,
+                "role": perp_role,
+                "time_in_force": perp_tif,
+                "target_price": perp_expected_px,
                 "quantity": perp_contracts_qty,
                 "quantity_str": f"{perp_contracts_qty:,.4f} contracts ({symbol})",
-                "expected_vwap": p_vwap,
-                "slippage_pct": p_slip,
+                "expected_vwap": perp_expected_px,
+                "slippage_pct": effective_perp_slip,
+                "fee_pct": perp_fee_pct,
                 "usd_value": target_usd
             }
         ]
 
         return {
+            "execution_mode": execution_mode,
+            "workflow_desc": workflow_desc,
             "symbol": symbol,
             "spot_symbol": spot_symbol,
             "multiplier": multiplier,
@@ -210,11 +286,13 @@ class BybitArbitrageExecutor:
             "perp_contracts_qty": perp_contracts_qty,
             "hourly_funding_pct": hourly_funding * 100.0,
             "expected_spot_vwap": s_vwap,
-            "spot_slippage_pct": s_slip,
+            "spot_slippage_pct": effective_spot_slip,
             "expected_perp_vwap": p_vwap,
-            "perp_slippage_pct": p_slip,
+            "perp_slippage_pct": effective_perp_slip,
             "combined_slippage_pct": comb_slip,
             "base_fee_pct": base_fee_pct,
+            "fee_savings_pct": fee_savings_pct,
+            "fee_savings_usd": fee_savings_usd,
             "total_cost_pct": total_cost_pct,
             "payback_hours": payback_hrs,
             "payback_str": payback_str,

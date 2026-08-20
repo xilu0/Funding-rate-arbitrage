@@ -78,6 +78,7 @@ class TestBybitArbitrageExecutor(unittest.TestCase):
         perp_asks = [(60010.0, 1.0)]
         perp_bids = [(60000.0, 1.0)]
 
+        # 1. Default Maker-Taker plan
         plan = self.executor.generate_try_run_plan(
             symbol="BTCUSDT",
             spot_symbol="BTCUSDT",
@@ -92,13 +93,51 @@ class TestBybitArbitrageExecutor(unittest.TestCase):
             perp_asks=perp_asks,
             perp_bids=perp_bids,
             perp_mid_px=60005.0,
-            force=False
+            force=False,
+            execution_mode="maker_taker"
         )
 
         self.assertEqual(plan["symbol"], "BTCUSDT")
         self.assertEqual(plan["target_usd"], 10000.0)
+        self.assertEqual(plan["execution_mode"], "maker_taker")
         self.assertEqual(len(plan["orders_plan"]), 2)
         self.assertEqual(plan["risk_guard"]["decision"], "PASSED")
+
+        spot_order = plan["orders_plan"][0]
+        perp_order = plan["orders_plan"][1]
+        self.assertEqual(spot_order["order_type"], "Limit (Post-Only / Maker)")
+        self.assertEqual(spot_order["time_in_force"], "PostOnly")
+        self.assertEqual(spot_order["target_price"], 59990.0) # Best Bid
+        self.assertEqual(spot_order["slippage_pct"], 0.0) # Post-Only Maker 0 slippage
+
+        self.assertEqual(perp_order["order_type"], "Market / IOC (Taker)")
+        self.assertEqual(perp_order["time_in_force"], "IOC")
+
+        self.assertGreater(plan["fee_savings_pct"], 0.0)
+        self.assertGreater(plan["fee_savings_usd"], 0.0)
+
+        # 2. Taker-Taker plan
+        plan_tt = self.executor.generate_try_run_plan(
+            symbol="BTCUSDT",
+            spot_symbol="BTCUSDT",
+            multiplier=1.0,
+            target_usd=10000.0,
+            spot_qty=0.166666,
+            perp_contracts_qty=0.166666,
+            hourly_funding=0.0001,
+            spot_asks=spot_asks,
+            spot_bids=spot_bids,
+            spot_mid_px=59995.0,
+            perp_asks=perp_asks,
+            perp_bids=perp_bids,
+            perp_mid_px=60005.0,
+            force=False,
+            execution_mode="taker_taker"
+        )
+        self.assertEqual(plan_tt["execution_mode"], "taker_taker")
+        self.assertEqual(plan_tt["orders_plan"][0]["order_type"], "Market (Taker)")
+        self.assertEqual(plan_tt["orders_plan"][1]["order_type"], "Market (Taker)")
+        self.assertAlmostEqual(plan_tt["fee_savings_pct"], 0.0)
 
 if __name__ == "__main__":
     unittest.main()

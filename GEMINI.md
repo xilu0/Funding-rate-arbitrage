@@ -84,3 +84,11 @@ python3 server.py --port 8000
   - **Level 3 (Emergency Breaker)**: Distance to liquidation $< 8\%$ $\to$ emergency market unwind $\ge 50\%$ positions.
   - **Cool-down Period**: 12 hours cool-down before re-leveraging after deleveraging to prevent high-frequency churn.
 
+### 3.5 Maker-Taker Trigger Hedge Architecture
+- **Standard Execution Paradigm**:
+  - **Spot Leg**: Place Post-Only Maker limit orders (`Alo` on Hyperliquid / `PostOnly` on Bybit) at Best Bid to eliminate spot taker fees and slippage.
+  - **Perp Leg**: Trigger millisecond IOC/Market taker orders upon spot fill to lock in 1:1 Delta neutrality without legging risk.
+  - **Fee Optimization**: Reduces entry fee frictions by **$50\% \sim 70\%$** (Hyperliquid from 0.105% to 0.050%, Bybit from 0.155% to 0.075%), cutting payback time in half.
+- **Reference**: See [`docs/maker_taker_execution_architecture.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/maker_taker_execution_architecture.md) for full execution guidelines.
+
+

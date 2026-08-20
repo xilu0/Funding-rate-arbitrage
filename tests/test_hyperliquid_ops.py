@@ -193,6 +193,37 @@ class TestHyperliquidExecutor(unittest.TestCase):
         self.assertEqual(res["status"], "SUCCESS")
         self.assertEqual(res["canceled_count"], 0)
 
+    def test_build_maker_taker_order_plan(self):
+        plan = self.executor.build_maker_taker_order_plan(
+            coin="PURR",
+            spot_pair="PURR/USDC",
+            target_usd=10000.0,
+            spot_price=0.10,
+            perp_price=0.101,
+            multiplier=1.0,
+            execution_mode="maker_taker"
+        )
+        self.assertEqual(plan["execution_mode"], "maker_taker")
+        self.assertEqual(plan["coin"], "PURR")
+        self.assertEqual(plan["spot_pair"], "PURR/USDC")
+        self.assertEqual(plan["target_usd"], 10000.0)
+        self.assertAlmostEqual(plan["spot_qty"], 100000.0)
+        self.assertAlmostEqual(plan["perp_qty"], 100000.0)
+
+        # Spot order is Alo (Post-Only)
+        self.assertEqual(plan["spot_order"]["order_type"], {"limit": {"tif": "Alo"}})
+        self.assertTrue(plan["spot_order"]["is_buy"])
+
+        # Perp order is Ioc (Taker)
+        self.assertEqual(plan["perp_order"]["order_type"], {"limit": {"tif": "Ioc"}})
+        self.assertFalse(plan["perp_order"]["is_buy"])
+
+        # Fee savings
+        self.assertAlmostEqual(plan["fee_summary"]["base_fee_pct"], 0.050)
+        self.assertAlmostEqual(plan["fee_summary"]["fee_savings_pct"], 0.055)
+        self.assertAlmostEqual(plan["fee_summary"]["fee_savings_usd"], 5.50)
+
 
 if __name__ == "__main__":
     unittest.main()
+

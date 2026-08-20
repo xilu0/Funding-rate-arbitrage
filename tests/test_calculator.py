@@ -66,8 +66,35 @@ class TestFundingRateCalculator(unittest.TestCase):
         # Should be sorted by funding rate descending (HYPE: 0.0001 > BTC: 0.00005)
         self.assertEqual(res[0]["coin"], "HYPE")
         self.assertEqual(res[0]["exchange"], "Hyperliquid")
+        self.assertEqual(res[0]["raw_spot_pair"], "HYPE/USDC")
         self.assertEqual(res[1]["coin"], "BTC")
         self.assertEqual(res[1]["spot_symbol"], "UBTC")
+
+    def test_match_and_calculate_with_non_contiguous_coin_ctx(self):
+        # Hyperliquid real API has hundreds of spot_ctxs where indices don't match universe order
+        perp_universe = [{"name": "HYPE"}]
+        perp_ctxs = [{"funding": "0.0000125", "markPx": "72.0", "midPx": "72.0", "dayNtlVlm": "1000000"}]
+        spot_tokens = [
+            {"name": "USDC", "index": 0},
+            {"name": "DUMMY", "index": 1},
+            {"name": "HYPE", "index": 150}
+        ]
+        spot_universe = [
+            {"tokens": [150, 0], "name": "@107", "isCanonical": False}
+        ]
+        spot_ctxs = [
+            {"coin": "@1", "midPx": "0.5", "dayNtlVlm": "100"},
+            {"coin": "@107", "midPx": "72.02", "dayNtlVlm": "2000000"},
+            {"coin": "@200", "midPx": "1.0", "dayNtlVlm": "500"}
+        ]
+
+        res = self.calc.match_and_calculate(perp_universe, perp_ctxs, spot_tokens, spot_universe, spot_ctxs)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["coin"], "HYPE")
+        self.assertEqual(res[0]["spot_symbol"], "HYPE")
+        self.assertEqual(res[0]["raw_spot_pair"], "@107")
+        self.assertEqual(res[0]["spot_pair"], "HYPE/USDC")
+        self.assertAlmostEqual(res[0]["spot_price"], 72.02)
 
     def test_parse_base_multiplier(self):
         from src.calculator import parse_base_multiplier

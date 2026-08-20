@@ -242,18 +242,24 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
                 ctx = perp_ctxs[matched_idx] if matched_idx < len(perp_ctxs) else {}
                 hourly_funding = safe_float(ctx.get("funding"))
 
-                hl_book = self.hl_client.get_l2_book(symbol)
-                levels = hl_book.get("levels", [[], []])
-                bids_raw = levels[0] if len(levels) > 0 else []
-                asks_raw = levels[1] if len(levels) > 1 else []
+                perp_book = self.hl_client.get_l2_book(symbol)
+                perp_levels = perp_book.get("levels", [[], []])
+                perp_bids_raw = perp_levels[0] if len(perp_levels) > 0 else []
+                perp_asks_raw = perp_levels[1] if len(perp_levels) > 1 else []
 
-                perp_asks = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in asks_raw]
-                perp_bids = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in bids_raw]
-                spot_asks = perp_asks # Fallback for HL if spot book separate
-                spot_bids = perp_bids
+                spot_coin = spot_symbol or symbol
+                spot_book = self.hl_client.get_l2_book(spot_coin)
+                spot_levels = spot_book.get("levels", [[], []])
+                spot_bids_raw = spot_levels[0] if len(spot_levels) > 0 and len(spot_levels[0]) > 0 else perp_bids_raw
+                spot_asks_raw = spot_levels[1] if len(spot_levels) > 1 and len(spot_levels[1]) > 0 else perp_asks_raw
+
+                perp_asks = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in perp_asks_raw]
+                perp_bids = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in perp_bids_raw]
+                spot_asks = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in spot_asks_raw]
+                spot_bids = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in spot_bids_raw]
 
                 spot_mid_px = (spot_asks[0][0] + spot_bids[0][0]) / 2.0 if spot_asks and spot_bids else safe_float(ctx.get("midPx"))
-                perp_mid_px = spot_mid_px
+                perp_mid_px = (perp_asks[0][0] + perp_bids[0][0]) / 2.0 if perp_asks and perp_bids else spot_mid_px
 
             capacity_eval = calc.evaluate_capital_capacity(
                 spot_asks=spot_asks,

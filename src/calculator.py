@@ -129,10 +129,23 @@ class FundingRateCalculator:
         # Token index to token object
         token_by_idx = {t["index"]: t for t in spot_tokens}
 
+        # Build spot_ctx lookup map if 'coin' is present
+        spot_ctx_by_coin = {}
+        for c in spot_ctxs:
+            if isinstance(c, dict) and "coin" in c:
+                spot_ctx_by_coin[c["coin"]] = c
+
         # Map spot pairs (focus on canonical / USDC / USDT quote pairs)
         spot_pairs_by_base = {}
         for i, pair in enumerate(spot_universe):
-            ctx = spot_ctxs[i] if i < len(spot_ctxs) else {}
+            pair_name = pair.get("name", "")
+            if pair_name in spot_ctx_by_coin:
+                ctx = spot_ctx_by_coin[pair_name]
+            elif i < len(spot_ctxs):
+                ctx = spot_ctxs[i]
+            else:
+                ctx = {}
+
             base_idx, quote_idx = pair["tokens"][0], pair["tokens"][1]
             base_token = token_by_idx.get(base_idx, {})
             quote_token = token_by_idx.get(quote_idx, {})
@@ -161,9 +174,17 @@ class FundingRateCalculator:
                 "is_canonical": pair.get("isCanonical", False)
             }
 
-            # If base symbol not yet mapped or current pair has higher volume/is canonical
-            if base_symbol not in spot_pairs_by_base or (pair_info["is_canonical"] and quote_symbol in ["USDC", "USDT"]):
+            # If base symbol not yet mapped or current pair has higher volume/better quote
+            existing = spot_pairs_by_base.get(base_symbol)
+            if not existing:
                 spot_pairs_by_base[base_symbol] = pair_info
+            else:
+                if quote_symbol == "USDC" and existing["quote_symbol"] != "USDC":
+                    spot_pairs_by_base[base_symbol] = pair_info
+                elif quote_symbol == existing["quote_symbol"] and day_ntl_vlm > existing["day_ntl_vlm"]:
+                    spot_pairs_by_base[base_symbol] = pair_info
+                elif existing["quote_symbol"] not in ["USDC", "USDT0", "USDT"] and quote_symbol in ["USDC", "USDT0", "USDT"]:
+                    spot_pairs_by_base[base_symbol] = pair_info
 
         # Match Spot and Perp
         results = []
@@ -214,6 +235,7 @@ class FundingRateCalculator:
                 "coin": matched_perp_coin,
                 "spot_symbol": base_symbol,
                 "spot_pair": spot_info["spot_pair_name"],
+                "raw_spot_pair": spot_info.get("raw_pair_name", spot_info["spot_pair_name"]),
                 "hourly_funding": hourly_funding,
                 "hourly_funding_pct": hourly_funding * 100.0,
                 "funding_interval_hr": 1.0,

@@ -274,7 +274,7 @@ function renderTable() {
                 <td>$${Math.round(item.perp_24h_volume).toLocaleString()}</td>
                 <td>
                     <button class="btn-action" onclick="openHistoryModal('${item.coin}')">📊 历史</button>
-                    <button class="btn-action btn-depth" onclick="openDepthModal('${item.exchange}', '${item.coin}', '${item.spot_symbol}')">⚖️ 容量</button>
+                    <button class="btn-action btn-depth" onclick="openDepthModal('${item.exchange}', '${item.coin}', '${item.raw_spot_pair || item.spot_symbol}')">⚖️ 容量</button>
                     <button class="btn-action btn-build" onclick="openBuildModal('${item.coin}', '${item.spot_symbol}')">🚀 建仓</button>
                 </td>
             </tr>

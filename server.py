@@ -353,7 +353,7 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
         spot_fee_pct = float(params.get("spot_fee", [default_spot_fee])[0])
         perp_fee_pct = float(params.get("perp_fee", [default_perp_fee])[0])
         enable_aliases = params.get("enable_aliases", ["true"])[0].lower() == "true"
-        max_spread_pct = float(params.get("max_spread", [100.0])[0])
+        max_spread_pct = float(params.get("max_spread", [10.0])[0])
 
         # Initialize calculator with requested fees
         calc = FundingRateCalculator(

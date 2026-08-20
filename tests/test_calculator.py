@@ -96,6 +96,44 @@ class TestFundingRateCalculator(unittest.TestCase):
         self.assertEqual(res[0]["spot_pair"], "HYPE/USDC")
         self.assertAlmostEqual(res[0]["spot_price"], 72.02)
 
+    def test_match_and_calculate_with_k_multiplier_and_bridged_aliases(self):
+        perp_universe = [{"name": "kBONK"}, {"name": "LINK"}, {"name": "XMR"}]
+        perp_ctxs = [
+            {"funding": "0.0001", "markPx": "0.0026", "midPx": "0.0026", "dayNtlVlm": "100000"},
+            {"funding": "0.00005", "markPx": "10.60", "midPx": "10.60", "dayNtlVlm": "500000"},
+            {"funding": "0.00008", "markPx": "417.0", "midPx": "417.0", "dayNtlVlm": "200000"}
+        ]
+        spot_tokens = [
+            {"name": "USDC", "index": 0},
+            {"name": "UBONK", "index": 1},
+            {"name": "LINK0", "index": 2},
+            {"name": "XMR1", "index": 3}
+        ]
+        spot_universe = [
+            {"tokens": [1, 0], "name": "@10", "isCanonical": False},
+            {"tokens": [2, 0], "name": "@20", "isCanonical": False},
+            {"tokens": [3, 0], "name": "@30", "isCanonical": False}
+        ]
+        spot_ctxs = [
+            {"coin": "@10", "midPx": "0.0000026", "dayNtlVlm": "50000"},
+            {"coin": "@20", "midPx": "10.60", "dayNtlVlm": "100000"},
+            {"coin": "@30", "midPx": "417.0", "dayNtlVlm": "150000"}
+        ]
+
+        res = self.calc.match_and_calculate(perp_universe, perp_ctxs, spot_tokens, spot_universe, spot_ctxs)
+        self.assertEqual(len(res), 3)
+        coins = {r["coin"]: r for r in res}
+        self.assertIn("kBONK", coins)
+        self.assertEqual(coins["kBONK"]["spot_symbol"], "UBONK")
+        self.assertEqual(coins["kBONK"]["multiplier"], 1000.0)
+        self.assertAlmostEqual(coins["kBONK"]["spread_pct"], 0.0)
+
+        self.assertIn("LINK", coins)
+        self.assertEqual(coins["LINK"]["spot_symbol"], "LINK0")
+
+        self.assertIn("XMR", coins)
+        self.assertEqual(coins["XMR"]["spot_symbol"], "XMR1")
+
     def test_parse_base_multiplier(self):
         from src.calculator import parse_base_multiplier
         self.assertEqual(parse_base_multiplier("1000PEPE"), (1000.0, "PEPE"))

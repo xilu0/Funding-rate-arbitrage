@@ -321,7 +321,7 @@ def main():
     parser.add_argument("--interval", type=int, default=5, help="Refresh interval in seconds (default: 5)")
     parser.add_argument("--spot-fee", type=float, default=None, help="Spot Taker Fee percentage (default: 0.07 for HL, 0.10 for Bybit)")
     parser.add_argument("--perp-fee", type=float, default=None, help="Perp Taker Fee percentage (default: 0.035 for HL, 0.055 for Bybit)")
-    parser.add_argument("--max-spread", type=float, default=100.0, help="Max allowed price spread percentage to filter fake symbol collisions (default: 100)")
+    parser.add_argument("--max-spread", type=float, default=10.0, help="Max allowed price spread percentage to filter fake symbol collisions (default: 10.0)")
     parser.add_argument("--no-alias", action="store_true", help="Disable token alias matching (e.g. UBTC->BTC)")
     parser.add_argument("--limit", type=int, default=None, help="Limit CLI table output rows")
     parser.add_argument("--json", action="store_true", help="Fetch once and output JSON to stdout")

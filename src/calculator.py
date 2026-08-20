@@ -12,12 +12,29 @@ DEFAULT_SPOT_TAKER_FEE = DEFAULT_HL_SPOT_TAKER_FEE
 DEFAULT_PERP_TAKER_FEE = DEFAULT_HL_PERP_TAKER_FEE
 
 COMMON_PREFIX_ALIASES = {
+    # Hyperliquid Unit Protocol Assets (U-prefix)
     'UBTC': 'BTC',
     'UETH': 'ETH',
     'USOL': 'SOL',
     'UDOGE': 'DOGE',
     'UAVAX': 'AVAX',
     'UENA': 'ENA',
+    'UPUMP': 'PUMP',
+    'UXPL': 'XPL',
+    'UMON': 'MON',
+    'UZEC': 'ZEC',
+    'UUUSPX': 'SPX',
+    'UFART': 'FARTCOIN',
+    'UVIRT': 'VIRTUAL',
+    'UBONK': 'kBONK',
+    # Hyperliquid HyBridge & Wagyu Bridged Assets (Suffix 0 / 1)
+    'LINK0': 'LINK',
+    'AAVE0': 'AAVE',
+    'AVAX0': 'AVAX',
+    'BNB1': 'BNB',
+    'BNB0': 'BNB',
+    'XMR1': 'XMR',
+    'CFX0': 'CFX',
 }
 
 def safe_float(val: Any, default: float = 0.0) -> float:
@@ -63,7 +80,7 @@ class FundingRateCalculator:
                  spot_taker_fee: float = DEFAULT_SPOT_TAKER_FEE, 
                  perp_taker_fee: float = DEFAULT_PERP_TAKER_FEE,
                  enable_aliases: bool = True,
-                 max_spread_pct: float = 100.0):
+                 max_spread_pct: float = 15.0):
         self.spot_taker_fee = spot_taker_fee
         self.perp_taker_fee = perp_taker_fee
         self.enable_aliases = enable_aliases
@@ -191,6 +208,7 @@ class FundingRateCalculator:
 
         for base_symbol, spot_info in spot_pairs_by_base.items():
             matched_perp_coin = None
+            mult = 1.0
 
             # 1. Exact match
             if base_symbol in perp_data:
@@ -205,6 +223,12 @@ class FundingRateCalculator:
             if not matched_perp_coin:
                 continue
 
+            # Determine multiplier for k-contracts or parsed prefixes
+            if matched_perp_coin.startswith("k") and len(matched_perp_coin) > 1 and matched_perp_coin[1:].isupper():
+                mult = 1000.0
+            else:
+                mult, _ = parse_base_multiplier(matched_perp_coin)
+
             perp_info = perp_data[matched_perp_coin]
 
             hourly_funding = perp_info["funding"]
@@ -217,10 +241,11 @@ class FundingRateCalculator:
                 apy_pct = float('inf')
 
             spot_px = spot_info["mid_px"]
+            scaled_spot_px = spot_px * mult
             perp_px = perp_info["mid_px"]
             
-            # Basis spread %
-            spread_pct = ((perp_px - spot_px) / spot_px * 100.0) if spot_px > 0 else 0.0
+            # Basis spread % (compared with scaled spot price for delta-neutrality)
+            spread_pct = ((perp_px - scaled_spot_px) / scaled_spot_px * 100.0) if scaled_spot_px > 0 else 0.0
 
             # Filter out fake symbol collisions if max_spread_pct is set (>0)
             if self.max_spread_pct > 0 and abs(spread_pct) > self.max_spread_pct:
@@ -236,6 +261,7 @@ class FundingRateCalculator:
                 "spot_symbol": base_symbol,
                 "spot_pair": spot_info["spot_pair_name"],
                 "raw_spot_pair": spot_info.get("raw_pair_name", spot_info["spot_pair_name"]),
+                "multiplier": mult,
                 "hourly_funding": hourly_funding,
                 "hourly_funding_pct": hourly_funding * 100.0,
                 "funding_interval_hr": 1.0,
@@ -243,6 +269,7 @@ class FundingRateCalculator:
                 "apr_pct": apr_pct,
                 "apy_pct": apy_pct,
                 "spot_price": spot_px,
+                "scaled_spot_price": scaled_spot_px,
                 "perp_price": perp_px,
                 "spread_pct": spread_pct,
                 "entry_payback_hrs": entry_payback_hrs,

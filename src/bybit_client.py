@@ -5,6 +5,7 @@ import urllib.parse
 import hmac
 import hashlib
 import time
+import os
 from typing import Dict, Any, List, Tuple, Optional
 
 BYBIT_API_BASE_URL = "https://api.bybit.com"
@@ -16,11 +17,37 @@ class BybitClient:
                  base_url: str = BYBIT_API_BASE_URL,
                  api_key: Optional[str] = None,
                  api_secret: Optional[str] = None,
+                 gopass_secret: Optional[str] = None,
                  timeout: int = 10):
+        # Auto-load from gopass secret if specified
+        gopass_secret = gopass_secret or os.getenv("GOPASS_BYBIT_SECRET") or os.getenv("GOPASS_SECRET")
+        if gopass_secret:
+            gopass_data = self.load_gopass_credentials(gopass_secret)
+            if not api_key and "BYBIT_API_KEY" in gopass_data:
+                api_key = gopass_data["BYBIT_API_KEY"]
+            if not api_secret and "BYBIT_API_SECRET" in gopass_data:
+                api_secret = gopass_data["BYBIT_API_SECRET"]
+
         self.base_url = base_url
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.api_key = api_key or os.getenv("BYBIT_API_KEY")
+        self.api_secret = api_secret or os.getenv("BYBIT_API_SECRET")
         self.timeout = timeout
+
+    @staticmethod
+    def load_gopass_credentials(secret_path: str) -> Dict[str, str]:
+        """Loads Key-Value pairs from a multi-line gopass secret."""
+        import subprocess
+        try:
+            res = subprocess.run(["gopass", "show", "-n", secret_path], capture_output=True, text=True, check=True)
+            creds = {}
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if ":" in line and not line.startswith("---"):
+                    k, v = line.split(":", 1)
+                    creds[k.strip()] = v.strip()
+            return creds
+        except Exception:
+            return {}
 
     def _get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{endpoint}"

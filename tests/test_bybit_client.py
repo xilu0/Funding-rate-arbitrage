@@ -21,7 +21,7 @@ class TestBybitClient(unittest.TestCase):
         '''
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        client = BybitClient()
+        client = BybitClient(api_key="mock_key", api_secret="mock_secret")
         tickers, instruments = client.get_spot_market_data()
 
         self.assertEqual(len(tickers), 1)
@@ -44,7 +44,7 @@ class TestBybitClient(unittest.TestCase):
         '''
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        client = BybitClient()
+        client = BybitClient(api_key="mock_key", api_secret="mock_secret")
         tickers, instruments = client.get_linear_market_data()
 
         self.assertEqual(len(tickers), 1)
@@ -69,7 +69,7 @@ class TestBybitClient(unittest.TestCase):
         '''
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        client = BybitClient()
+        client = BybitClient(api_key="mock_key", api_secret="mock_secret")
         history = client.get_funding_rate_history("BTCUSDT", limit=10)
 
         self.assertEqual(len(history), 1)

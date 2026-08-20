@@ -3,12 +3,74 @@ import sys
 import time
 import argparse
 import json
+import re
 from typing import Optional, Tuple
-from rich.console import Console
-from rich.table import Table
-from rich.live import Live
-from rich.panel import Panel
-from rich.text import Text
+from src.version import __version__, format_version_text, get_diagnostics
+
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.text import Text
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+    class Text:
+        def __init__(self, text="", style=None):
+            self.text = text
+        def __str__(self):
+            return self.text
+
+    class Panel:
+        def __init__(self, renderable, title=None, subtitle=None):
+            self.renderable = str(renderable)
+            self.title = title
+            self.subtitle = subtitle
+        def __str__(self):
+            out = []
+            clean_title = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', self.title) if self.title else None
+            clean_body = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', self.renderable)
+            clean_sub = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', self.subtitle) if self.subtitle else None
+            if clean_title:
+                out.append(f"\n==================== {clean_title} ====================")
+            out.append(clean_body)
+            if clean_sub:
+                out.append(f"-------------------- {clean_sub} --------------------")
+            return "\n".join(out)
+
+    class Table:
+        def __init__(self, title=None, show_lines=False, header_style=None, title_style=None):
+            self.title = title
+            self.columns = []
+            self.rows = []
+        def add_column(self, header, justify="left", style=None, no_wrap=False):
+            self.columns.append(header)
+        def add_row(self, *args):
+            self.rows.append([str(a) for a in args])
+        def __str__(self):
+            def clean(s):
+                return re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', str(s))
+            out = []
+            if self.title:
+                out.append(f"\n>>> {clean(self.title)}")
+            if self.columns:
+                col_headers = [clean(c) for c in self.columns]
+                out.append(" | ".join(col_headers))
+                out.append("-" * max(len(" | ".join(col_headers)), 40))
+            for row in self.rows:
+                out.append(" | ".join([clean(r) for r in row]))
+            return "\n".join(out)
+
+    class Console:
+        def print(self, *args, **kwargs):
+            cleaned_args = []
+            for a in args:
+                if isinstance(a, (Panel, Table, Text)):
+                    cleaned_args.append(str(a))
+                else:
+                    cleaned_args.append(re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', str(a)))
+            print(*cleaned_args)
 
 from src.hyperliquid_client import HyperliquidClient
 from src.bybit_client import BybitClient
@@ -331,12 +393,21 @@ def main():
     parser.add_argument("--no-alias", action="store_true", help="Disable token alias matching (e.g. UBTC->BTC)")
     parser.add_argument("--limit", type=int, default=None, help="Limit CLI table output rows")
     parser.add_argument("--json", action="store_true", help="Fetch once and output JSON to stdout")
+    parser.add_argument("--version", "-v", action="store_true", help="Show application version and diagnostic info")
     parser.add_argument("--hl-check", action="store_true", help="Run Hyperliquid API Wallet verification & canary diagnostic")
     parser.add_argument("--hl-status", action="store_true", help="Show Hyperliquid Scheme D portfolio status & risk tier")
     parser.add_argument("--hl-account", type=str, default=None, help="Hyperliquid Master Account address")
     parser.add_argument("--hl-agent-key", type=str, default=None, help="Hyperliquid Agent Wallet private key")
+    parser.add_argument("--gopass", "-g", type=str, default=None, help="Gopass secret path (e.g. trading/hyperliquid/mainnet)")
 
     args = parser.parse_args()
+
+    if args.version:
+        if args.json:
+            print(json.dumps(get_diagnostics(), indent=2))
+        else:
+            print(format_version_text())
+        return
 
     hl_client = HyperliquidClient()
     bybit_client = BybitClient()
@@ -348,6 +419,7 @@ def main():
         hl_exec = HyperliquidExecutor(
             account_address=args.hl_account,
             agent_private_key=args.hl_agent_key,
+            gopass_secret=args.gopass,
             hl_client=hl_client
         )
         if args.hl_check:

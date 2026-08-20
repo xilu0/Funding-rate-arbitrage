@@ -15,6 +15,7 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
   - Historical funding rate stability metrics & negative funding penalty.
   - L2 orderbook depth capacity & estimated market impact / slippage.
 - **`src/bybit_executor.py`**: Delta-neutral arbitrage builder with quantitative risk guards (slippage cap, payback cap, spread cap) and dry-run safety simulation.
+- **`src/version.py`**: Version management and runtime environment diagnostics (Python, Gopass, dependencies, virtualenv status).
 - **`server.py`**: Lightweight REST API server built with Python standard library `http.server`, serving `/api/funding-rates`, `/api/bybit/funding-history`, `/api/depth-capacity`, `/api/bybit/build-arbitrage`, and static web assets.
 - **`scripts/hl_ops.py`**: Production CLI tool for Hyperliquid API Wallet diagnostics, portfolio health monitoring, emergency panic cancel, USD transfers, and deleveraging.
 - **`monitor.py`**: Terminal CLI interface with Rich formatting, live updating, and sorting/filtering.

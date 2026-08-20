@@ -311,11 +311,12 @@ def main():
     parser.add_argument("--dry-run", "--try-run", action="store_true", default=True, help="Dry-run simulation mode (default: True)")
     parser.add_argument("--execute", action="store_true", help="Enable live order execution on exchange")
     parser.add_argument("--force", action="store_true", help="Force execution even if risk guard flags warnings")
-    parser.add_argument("--max-slippage", type=float, default=0.50, help="Max allowed combined slippage % threshold (default: 0.50)")
+    parser.add_argument("--max-slippage", type=float, default=0.50, help="Max allowed combined slippage %% threshold (default: 0.50)")
     parser.add_argument("--max-payback", type=float, default=72.0, help="Max allowed payback hours threshold (default: 72.0)")
     parser.add_argument("--target-usd", type=float, default=None, help="Custom target USD capital amount for depth evaluation")
     parser.add_argument("--days", type=int, default=30, help="Days of history to analyze when --history is passed (default: 30)")
-    parser.add_argument("--cli", action="store_true", help="Run in Terminal CLI mode")
+    parser.add_argument("--live", "--cli", dest="live", action="store_true", help="Run in continuous live refresh mode in terminal")
+    parser.add_argument("--web", action="store_true", help="Run Web UI dashboard server")
     parser.add_argument("--port", type=int, default=8080, help="Port to run Web UI server (default: 8080)")
     parser.add_argument("--interval", type=int, default=5, help="Refresh interval in seconds (default: 5)")
     parser.add_argument("--spot-fee", type=float, default=None, help="Spot Taker Fee percentage (default: 0.07 for HL, 0.10 for Bybit)")
@@ -518,11 +519,25 @@ def main():
         print(json.dumps(results, indent=2))
         return
 
-    if args.cli:
-        run_cli_loop(args.exchange, hl_client, bybit_client, calculator, args.interval, args.limit)
-    else:
+    if args.web:
         from server import start_web_server
         start_web_server(args.port, hl_client, bybit_client, calculator, args.interval)
+    elif args.live:
+        run_cli_loop(args.exchange, hl_client, bybit_client, calculator, args.interval, args.limit)
+    else:
+        console = Console()
+        console.print(f"[bold cyan]Fetching Capital Funding Rate Arbitrage Snapshot ({args.exchange.upper()})...[/bold cyan]")
+        results = fetch_data_for_exchange(args.exchange, hl_client, bybit_client, calculator)
+        table = render_cli_table(
+            results,
+            calculator.spot_taker_fee * 100.0,
+            calculator.perp_taker_fee * 100.0,
+            args.limit
+        )
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        footer_text = Text(f"Snapshot taken: {timestamp} UTC | Monitored Pairs: {len(results)} | Fees: Spot Taker {calculator.spot_taker_fee*100:.3f}%, Perp Taker {calculator.perp_taker_fee*100:.3f}%", style="dim italic")
+        panel = Panel(table, subtitle=footer_text)
+        console.print(panel)
 
 if __name__ == "__main__":
     main()

@@ -417,7 +417,7 @@ def start_web_server(port: int,
                      hl_client: HyperliquidClient, 
                      bybit_client: BybitClient,
                      calculator: FundingRateCalculator, 
-                     interval: int):
+                     interval: int = 30):
     ArbitrageServerHandler.hl_client = hl_client
     ArbitrageServerHandler.bybit_client = bybit_client
     ArbitrageServerHandler.calculator = calculator
@@ -433,4 +433,27 @@ def start_web_server(port: int,
     except KeyboardInterrupt:
         print("\nShutting down web server...")
         server.server_close()
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Capital Spot & Perp Funding Rate Arbitrage Web Server")
+    parser.add_argument("--port", type=int, default=8000, help="Web server port (default: 8000)")
+    parser.add_argument("--interval", type=int, default=30, help="Refresh interval (default: 30)")
+    parser.add_argument("--spot-fee", type=float, default=None, help="Spot taker fee percentage (e.g. 0.07)")
+    parser.add_argument("--perp-fee", type=float, default=None, help="Perp taker fee percentage (e.g. 0.035)")
+    args = parser.parse_args()
+
+    hl_client = HyperliquidClient()
+    bybit_client = BybitClient()
+
+    spot_fee = args.spot_fee / 100.0 if args.spot_fee is not None else DEFAULT_HL_SPOT_TAKER_FEE
+    perp_fee = args.perp_fee / 100.0 if args.perp_fee is not None else DEFAULT_HL_PERP_TAKER_FEE
+    calculator = FundingRateCalculator(
+        spot_taker_fee=spot_fee,
+        perp_taker_fee=perp_fee
+    )
+    start_web_server(args.port, hl_client, bybit_client, calculator, args.interval)
+
+if __name__ == "__main__":
+    main()
 

@@ -77,6 +77,22 @@ function setupAutoRefresh() {
     }
 }
 
+function formatPrice(val) {
+    if (val === null || val === undefined || isNaN(val)) return "--";
+    const num = Number(val);
+    if (num === 0) return "0.00";
+    const absNum = Math.abs(num);
+    if (absNum >= 1000) {
+        return num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    } else if (absNum >= 1) {
+        return num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    } else if (absNum >= 0.0001) {
+        return num.toFixed(6);
+    } else {
+        return num.toFixed(8);
+    }
+}
+
 async function fetchData() {
     const statusText = document.getElementById("sync-status");
     statusText.textContent = "更新数据中...";
@@ -103,10 +119,18 @@ async function fetchData() {
             statusText.textContent = "实时同步中";
         } else {
             statusText.textContent = "数据获取失败";
+            const tbody = document.getElementById("table-body");
+            if (tbody && (!rawData || rawData.length === 0)) {
+                tbody.innerHTML = `<tr><td colspan="13" class="loading-cell">数据获取失败: ${json.message || '未知错误'}</td></tr>`;
+            }
         }
     } catch (err) {
         console.error("Fetch error:", err);
         statusText.textContent = "网络连接错误";
+        const tbody = document.getElementById("table-body");
+        if (tbody && (!rawData || rawData.length === 0)) {
+            tbody.innerHTML = `<tr><td colspan="13" class="loading-cell">网络请求失败或前端解析错误: ${err.message}</td></tr>`;
+        }
     }
 }
 
@@ -396,7 +420,7 @@ function renderDepthCapacityUI(data) {
         } else {
             const totSlip = sim.combined_slippage_pct;
             const slipClass = totSlip <= 0.20 ? "rate-positive" : (totSlip <= 0.50 ? "" : "rate-negative");
-            const statusBadgeClass = "推荐" in sim.status ? "rate-positive" : "";
+            const statusBadgeClass = (sim.status && sim.status.includes("推荐")) ? "rate-positive" : "";
 
             html += `
                 <tr class="${rowClass}">

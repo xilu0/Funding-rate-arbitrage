@@ -173,6 +173,9 @@ class BybitClient:
         }
         if start_time:
             params["startTime"] = str(start_time)
+            if not end_time:
+                import time
+                params["endTime"] = str(int(time.time() * 1000))
         if end_time:
             params["endTime"] = str(end_time)
 

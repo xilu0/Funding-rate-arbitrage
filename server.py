@@ -2,10 +2,11 @@ import os
 import json
 import urllib.parse
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple, Callable
 
 from src.hyperliquid_client import HyperliquidClient
 from src.bybit_client import BybitClient
+from src.storage import FundingHistoryStorage
 from src.calculator import (
     FundingRateCalculator,
     DEFAULT_HL_SPOT_TAKER_FEE,
@@ -20,6 +21,7 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
     hl_client: HyperliquidClient = None
     bybit_client: BybitClient = None
     calculator: FundingRateCalculator = None
+    storage: FundingHistoryStorage = None
     cache: Dict[str, Any] = {}
 
     def __init__(self, *args, **kwargs):
@@ -33,6 +35,8 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.handle_api_funding_rates(parsed.query)
         elif path in ["/api/funding-history", "/api/bybit/funding-history", "/api/hyperliquid/funding-history"]:
             self.handle_api_funding_history(parsed.query, requested_path=path)
+        elif path == "/api/storage/summary":
+            self.handle_api_storage_summary(parsed.query)
         elif path == "/api/depth-capacity":
             self.handle_api_depth_capacity(parsed.query)
         elif path in ["/api/build-arbitrage", "/api/bybit/build-arbitrage"]:
@@ -440,13 +444,44 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.wfile.write(err_bytes)
 
 
+    def handle_api_storage_summary(self, query_str: str):
+        params = urllib.parse.parse_qs(query_str)
+        exchange = params.get("exchange", [""])[0].strip()
+        if not self.storage:
+            self.storage = FundingHistoryStorage()
+        try:
+            summary = self.storage.get_symbols_summary(exchange=exchange if exchange else None)
+            total_records = sum(item.get("count", 0) for item in summary)
+            payload = {
+                "status": "success",
+                "total_symbols": len(summary),
+                "total_records": total_records,
+                "db_path": self.storage.db_path,
+                "data": summary
+            }
+            response_bytes = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(response_bytes)))
+            self.end_headers()
+            self.wfile.write(response_bytes)
+        except Exception as e:
+            err_payload = {"status": "error", "message": str(e)}
+            err_bytes = json.dumps(err_payload).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(err_bytes)
+
     def handle_api_funding_history(self, query_str: str, requested_path: str = "/api/funding-history"):
-        import time
         params = urllib.parse.parse_qs(query_str)
         exchange = params.get("exchange", [""])[0].strip().lower()
         symbol = params.get("symbol", ["BTCUSDT"])[0].strip()
         days_str = params.get("days", ["30"])[0].strip()
         limit_str = params.get("limit", ["500"])[0].strip()
+        force_sync = params.get("force", ["false"])[0].lower() == "true"
 
         try:
             days = int(days_str) if days_str else 30
@@ -469,37 +504,54 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             else:
                 exchange = "hyperliquid"
 
+        if not self.storage:
+            self.storage = FundingHistoryStorage()
+
         try:
             if exchange in ["hyperliquid", "hl"]:
-                if not self.hl_client:
-                    self.hl_client = HyperliquidClient()
+                def fetch_hl(sym: str, start_time: Optional[int]) -> list:
+                    if not self.hl_client:
+                        self.hl_client = HyperliquidClient()
+                    return self.hl_client.get_funding_rate_history(sym, start_time=start_time)
 
-                start_time = int((time.time() - days * 86400) * 1000) if (days and days > 0) else 0
-                raw_history = self.hl_client.get_funding_rate_history(symbol, start_time=start_time)
-                result_payload = FundingRateCalculator.calculate_funding_history_stats(raw_history, days=days)
+                records, meta = self.storage.sync_and_get_history(
+                    exchange="Hyperliquid",
+                    symbol=symbol,
+                    days=days,
+                    fetch_func=fetch_hl,
+                    force_sync=force_sync
+                )
+                result_payload = FundingRateCalculator.calculate_funding_history_stats(records, days=days)
+                result_payload["storage_meta"] = meta
                 resp_exchange = "Hyperliquid"
                 resp_symbol = symbol
             else:
                 # Bybit
-                if not self.bybit_client:
-                    self.bybit_client = BybitClient()
-
-                # Normalize Bybit symbol (e.g. BTC -> BTCUSDT, 1000PEPE -> 1000PEPEUSDT)
                 bybit_symbol = symbol
                 if not bybit_symbol.endswith("USDT") and not bybit_symbol.endswith("USDC") and not bybit_symbol.endswith("PERP"):
                     bybit_symbol = f"{symbol}USDT"
 
-                bybit_limit = min(limit, 200)
-                try:
-                    raw_history = self.bybit_client.get_funding_rate_history(bybit_symbol, limit=bybit_limit)
-                    resp_symbol = bybit_symbol
-                except Exception:
-                    # Fallback to original symbol if appending USDT failed
-                    raw_history = self.bybit_client.get_funding_rate_history(symbol, limit=bybit_limit)
-                    resp_symbol = symbol
+                def fetch_bybit(sym: str, start_time: Optional[int]) -> list:
+                    if not self.bybit_client:
+                        self.bybit_client = BybitClient()
+                    try:
+                        return self.bybit_client.get_funding_rate_history(sym, start_time=start_time, limit=200)
+                    except Exception:
+                        if sym != symbol:
+                            return self.bybit_client.get_funding_rate_history(symbol, start_time=start_time, limit=200)
+                        raise
 
-                result_payload = FundingRateCalculator.calculate_funding_history_stats(raw_history, days=days)
+                records, meta = self.storage.sync_and_get_history(
+                    exchange="Bybit",
+                    symbol=bybit_symbol,
+                    days=days,
+                    fetch_func=fetch_bybit,
+                    force_sync=force_sync
+                )
+                result_payload = FundingRateCalculator.calculate_funding_history_stats(records, days=days)
+                result_payload["storage_meta"] = meta
                 resp_exchange = "Bybit"
+                resp_symbol = bybit_symbol
 
             payload = {
                 "status": "success",

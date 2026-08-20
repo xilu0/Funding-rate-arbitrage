@@ -15,8 +15,9 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
   - Historical funding rate stability metrics & negative funding penalty.
   - L2 orderbook depth capacity & estimated market impact / slippage.
 - **`src/bybit_executor.py`**: Delta-neutral arbitrage builder with quantitative risk guards (slippage cap, payback cap, spread cap) and dry-run safety simulation.
+- **`src/storage.py`**: SQLite-based local storage manager with high-water mark incremental synchronization and offline caching for funding rate history.
 - **`src/version.py`**: Version management and runtime environment diagnostics (Python, Gopass, dependencies, virtualenv status).
-- **`server.py`**: Lightweight REST API server built with Python standard library `http.server`, serving `/api/funding-rates`, `/api/funding-history` (Hyperliquid & Bybit), `/api/depth-capacity`, `/api/bybit/build-arbitrage`, and static web assets.
+- **`server.py`**: Lightweight REST API server built with Python standard library `http.server`, serving `/api/funding-rates`, `/api/funding-history` (Hyperliquid & Bybit), `/api/storage/summary`, `/api/depth-capacity`, `/api/bybit/build-arbitrage`, and static web assets.
 - **`scripts/hl_ops.py`**: Production CLI tool for Hyperliquid API Wallet diagnostics, portfolio health monitoring, emergency panic cancel, USD transfers, and deleveraging.
 - **`monitor.py`**: Terminal CLI interface with Rich formatting, live updating, and sorting/filtering.
 - **`web/`**: Dashboard frontend (`index.html`, `app.js`, `style.css`).
@@ -69,6 +70,9 @@ python3 server.py --port 8000
 - **Robust Error Handling**: Handle API network timeouts, missing fields, rate limits, and non-200 responses gracefully without crashing server or monitor loops.
 
 ### 3.4 Hyperliquid Default Arbitrage Architecture (Scheme D)
+- **Account Mode & Eligibility Requirement**:
+  - Requires **Portfolio Margin** mode (Standard/Unified modes do not support cross-asset collateralization for perps).
+  - **Eligibility Gate**: Requires Account Value $\ge \$10,000$ OR Total/Weighted Trading Volume $\ge \$5,000,000$ (and $<\$25\text{M}$ during Beta).
 - **Standard Capital Allocation (Scheme D)**:
   - 90% Spot Token Allocation (pledged as collateral with 50% haircut / collateral ratio).
   - 90% Perp Short Notional (Delta-neutral 1:1 hedge against spot holdings).

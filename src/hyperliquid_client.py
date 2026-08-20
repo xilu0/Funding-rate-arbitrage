@@ -62,3 +62,81 @@ class HyperliquidClient:
         if isinstance(res, dict) and "levels" in res:
             return res
         return {"levels": [[], []]}
+
+    def get_clearinghouse_state(self, user: str) -> Dict[str, Any]:
+        """
+        Fetches clearinghouse state (Perp positions, account value, margin summary) for a user address.
+        Note: Must use Master Account public address, not the agent wallet address.
+        """
+        res = self._post({"type": "clearinghouseState", "user": user})
+        if isinstance(res, dict):
+            return res
+        return {}
+
+    def get_spot_clearinghouse_state(self, user: str) -> Dict[str, Any]:
+        """
+        Fetches spot clearinghouse state (Token balances, entry notional) for a user address.
+        Note: Must use Master Account public address.
+        """
+        res = self._post({"type": "spotClearinghouseState", "user": user})
+        if isinstance(res, dict):
+            return res
+        return {}
+
+    def get_open_orders(self, user: str) -> list:
+        """
+        Fetches all open orders for a user address.
+        """
+        res = self._post({"type": "openOrders", "user": user})
+        if isinstance(res, list):
+            return res
+        return []
+
+    def get_frontend_open_orders(self, user: str) -> list:
+        """
+        Fetches open orders formatted for frontend (including trigger orders).
+        """
+        res = self._post({"type": "frontendOpenOrders", "user": user})
+        if isinstance(res, list):
+            return res
+        return []
+
+    def get_user_fills(self, user: str) -> list:
+        """
+        Fetches recent trade fills for a user address.
+        """
+        res = self._post({"type": "userFills", "user": user})
+        if isinstance(res, list):
+            return res
+        return []
+
+    def get_user_funding(self, user: str, start_time: Optional[int] = None) -> list:
+        """
+        Fetches user funding payment history.
+        """
+        payload: Dict[str, Any] = {"type": "userFunding", "user": user}
+        if start_time is not None:
+            payload["startTime"] = start_time
+        res = self._post(payload)
+        if isinstance(res, list):
+            return res
+        return []
+
+    def get_extra_agents(self, user: str) -> list:
+        """
+        Fetches list of approved extra agents (API wallets) for a master user address.
+        """
+        res = self._post({"type": "extraAgents", "user": user})
+        if isinstance(res, list):
+            return res
+        return []
+
+    def get_user_rate_limit(self, user: str) -> Dict[str, Any]:
+        """
+        Fetches API rate limit consumption for a user or agent address.
+        """
+        res = self._post({"type": "userRateLimit", "user": user})
+        if isinstance(res, dict):
+            return res
+        return {}
+

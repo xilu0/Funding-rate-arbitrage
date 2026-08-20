@@ -12,7 +12,13 @@ from rich.text import Text
 
 from src.hyperliquid_client import HyperliquidClient
 from src.bybit_client import BybitClient
-from src.calculator import FundingRateCalculator
+from src.calculator import (
+    FundingRateCalculator,
+    DEFAULT_HL_SPOT_TAKER_FEE,
+    DEFAULT_HL_PERP_TAKER_FEE,
+    DEFAULT_BYBIT_SPOT_TAKER_FEE,
+    DEFAULT_BYBIT_PERP_TAKER_FEE
+)
 
 def render_cli_table(data: list, 
                      spot_fee_pct: float, 
@@ -325,11 +331,48 @@ def main():
     parser.add_argument("--no-alias", action="store_true", help="Disable token alias matching (e.g. UBTC->BTC)")
     parser.add_argument("--limit", type=int, default=None, help="Limit CLI table output rows")
     parser.add_argument("--json", action="store_true", help="Fetch once and output JSON to stdout")
+    parser.add_argument("--hl-check", action="store_true", help="Run Hyperliquid API Wallet verification & canary diagnostic")
+    parser.add_argument("--hl-status", action="store_true", help="Show Hyperliquid Scheme D portfolio status & risk tier")
+    parser.add_argument("--hl-account", type=str, default=None, help="Hyperliquid Master Account address")
+    parser.add_argument("--hl-agent-key", type=str, default=None, help="Hyperliquid Agent Wallet private key")
 
     args = parser.parse_args()
 
     hl_client = HyperliquidClient()
     bybit_client = BybitClient()
+
+    if args.hl_check or args.hl_status:
+        from src.hyperliquid_executor import HyperliquidExecutor
+        from scripts.hl_ops import render_check_report, render_status_report
+        console = Console()
+        hl_exec = HyperliquidExecutor(
+            account_address=args.hl_account,
+            agent_private_key=args.hl_agent_key,
+            hl_client=hl_client
+        )
+        if args.hl_check:
+            auth_res = hl_exec.check_agent_authorization()
+            canary_res = hl_exec.run_canary_test()
+            if args.json:
+                print(json.dumps({"auth": auth_res, "canary": canary_res}, indent=2))
+            else:
+                p, t = render_check_report(auth_res, canary_res)
+                console.print(p)
+                console.print(t)
+            return
+        if args.hl_status:
+            if not hl_exec.account_address:
+                console.print("[bold red]❌ 请指定 Master 地址 (--hl-account 或环境变量 HL_ACCOUNT_ADDRESS)[/bold red]")
+                return
+            health = hl_exec.evaluate_scheme_d_health()
+            if args.json:
+                print(json.dumps(health, indent=2))
+            else:
+                p, st, pt = render_status_report(health)
+                console.print(p)
+                console.print(st)
+                console.print(pt)
+            return
 
     if args.build_arbitrage:
         console = Console()
@@ -347,58 +390,134 @@ def main():
             default_max_payback_hours=args.max_payback
         )
 
-        linear_tickers, _ = bybit_client.get_linear_market_data()
-        perp_ticker = next((t for t in linear_tickers if t.get("symbol") == symbol), {})
-        funding_rate = safe_float(perp_ticker.get("fundingRate"))
-        interval_hr = safe_float(perp_ticker.get("fundingIntervalHour"), default=8.0)
-        hourly_funding = funding_rate / (interval_hr if interval_hr > 0 else 8.0)
-        perp_price = safe_float(perp_ticker.get("lastPrice"))
+        is_hl = args.exchange == "hyperliquid" or (args.exchange == "all" and not symbol.endswith("USDT") and not symbol.endswith("USDC"))
 
-        base_coin = symbol[:-4] if symbol.endswith("USDT") or symbol.endswith("USDC") else symbol
-        mult, clean_base = parse_base_multiplier(base_coin)
-        spot_sym = f"{clean_base}USDT"
+        if is_hl:
+            spot_fee = args.spot_fee / 100.0 if args.spot_fee is not None else DEFAULT_HL_SPOT_TAKER_FEE
+            perp_fee = args.perp_fee / 100.0 if args.perp_fee is not None else DEFAULT_HL_PERP_TAKER_FEE
+            calc = FundingRateCalculator(
+                spot_taker_fee=spot_fee,
+                perp_taker_fee=perp_fee
+            )
+            executor = BybitArbitrageExecutor(
+                calculator=calc,
+                default_max_slippage_pct=args.max_slippage,
+                default_max_payback_hours=args.max_payback
+            )
 
-        spot_tickers, _ = bybit_client.get_spot_market_data()
-        spot_ticker = next((t for t in spot_tickers if t.get("symbol") == spot_sym), {})
-        spot_price = safe_float(spot_ticker.get("lastPrice")) * mult
+            perp_univ, perp_ctxs = hl_client.get_perp_market_data()
+            matched_idx = next((i for i, u in enumerate(perp_univ) if u.get("name") == symbol), None)
+            if matched_idx is None:
+                console.print(f"[bold red]❌ 标的 {symbol} 在 Hyperliquid 永续合约中未找到[/bold red]")
+                return
 
-        size_info = executor.parse_execution_size(
-            symbol=symbol,
-            amount_usd=args.amount_usd or (10000.0 if not args.amount_qty else None),
-            amount_qty=args.amount_qty,
-            spot_price=spot_price,
-            perp_price=perp_price
-        )
+            ctx = perp_ctxs[matched_idx]
+            hourly_funding = safe_float(ctx.get("funding"))
 
-        spot_book = bybit_client.get_orderbook("spot", spot_sym, limit=200)
-        perp_book = bybit_client.get_orderbook("linear", symbol, limit=200)
+            if symbol.startswith("k") and len(symbol) > 1 and symbol[1:].isupper():
+                mult = 1000.0
+            else:
+                mult, _ = parse_base_multiplier(symbol)
 
-        spot_asks = [(safe_float(px)*mult, safe_float(sz)/mult) for px, sz in spot_book.get("a", [])]
-        spot_bids = [(safe_float(px)*mult, safe_float(sz)/mult) for px, sz in spot_book.get("b", [])]
-        perp_asks = [(safe_float(px), safe_float(sz)) for px, sz in perp_book.get("a", [])]
-        perp_bids = [(safe_float(px), safe_float(sz)) for px, sz in perp_book.get("b", [])]
+            spot_coin = symbol
+            perp_book = hl_client.get_l2_book(symbol)
+            spot_book = hl_client.get_l2_book(spot_coin)
 
-        spot_mid = (spot_asks[0][0] + spot_bids[0][0]) / 2.0 if spot_asks and spot_bids else spot_price
-        perp_mid = (perp_asks[0][0] + perp_bids[0][0]) / 2.0 if perp_asks and perp_bids else perp_price
+            perp_levels = perp_book.get("levels", [[], []])
+            spot_levels = spot_book.get("levels", [[], []])
 
-        try_run_plan = executor.generate_try_run_plan(
-            symbol=symbol,
-            spot_symbol=spot_sym,
-            multiplier=mult,
-            target_usd=size_info["target_usd"],
-            spot_qty=size_info["spot_qty"],
-            perp_contracts_qty=size_info["perp_contracts_qty"],
-            hourly_funding=hourly_funding,
-            spot_asks=spot_asks,
-            spot_bids=spot_bids,
-            spot_mid_px=spot_mid,
-            perp_asks=perp_asks,
-            perp_bids=perp_bids,
-            perp_mid_px=perp_mid,
-            max_slippage_pct=args.max_slippage,
-            max_payback_hours=args.max_payback,
-            force=force
-        )
+            perp_bids_raw = perp_levels[0] if len(perp_levels) > 0 else []
+            perp_asks_raw = perp_levels[1] if len(perp_levels) > 1 else []
+            spot_bids_raw = spot_levels[0] if len(spot_levels) > 0 and len(spot_levels[0]) > 0 else perp_bids_raw
+            spot_asks_raw = spot_levels[1] if len(spot_levels) > 1 and len(spot_levels[1]) > 0 else perp_asks_raw
+
+            perp_asks = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in perp_asks_raw]
+            perp_bids = [(safe_float(item.get("px")), safe_float(item.get("sz"))) for item in perp_bids_raw]
+            spot_asks = [(safe_float(item.get("px")) * mult, safe_float(item.get("sz")) / mult) for item in spot_asks_raw]
+            spot_bids = [(safe_float(item.get("px")) * mult, safe_float(item.get("sz")) / mult) for item in spot_bids_raw]
+
+            spot_mid = (spot_asks[0][0] + spot_bids[0][0]) / 2.0 if spot_asks and spot_bids else safe_float(ctx.get("midPx"))
+            perp_mid = (perp_asks[0][0] + perp_bids[0][0]) / 2.0 if perp_asks and perp_bids else spot_mid
+
+            size_info = executor.parse_execution_size(
+                symbol=symbol,
+                amount_usd=args.amount_usd or (10000.0 if not args.amount_qty else None),
+                amount_qty=args.amount_qty,
+                spot_price=spot_mid,
+                perp_price=perp_mid
+            )
+
+            try_run_plan = executor.generate_try_run_plan(
+                symbol=f"{symbol}-PERP",
+                spot_symbol=f"{symbol}/USDC",
+                multiplier=mult,
+                target_usd=size_info["target_usd"],
+                spot_qty=size_info["spot_qty"],
+                perp_contracts_qty=size_info["perp_contracts_qty"],
+                hourly_funding=hourly_funding,
+                spot_asks=spot_asks,
+                spot_bids=spot_bids,
+                spot_mid_px=spot_mid,
+                perp_asks=perp_asks,
+                perp_bids=perp_bids,
+                perp_mid_px=perp_mid,
+                max_slippage_pct=args.max_slippage,
+                max_payback_hours=args.max_payback,
+                force=force
+            )
+        else:
+            linear_tickers, _ = bybit_client.get_linear_market_data()
+            perp_ticker = next((t for t in linear_tickers if t.get("symbol") == symbol), {})
+            funding_rate = safe_float(perp_ticker.get("fundingRate"))
+            interval_hr = safe_float(perp_ticker.get("fundingIntervalHour"), default=8.0)
+            hourly_funding = funding_rate / (interval_hr if interval_hr > 0 else 8.0)
+            perp_price = safe_float(perp_ticker.get("lastPrice"))
+
+            base_coin = symbol[:-4] if symbol.endswith("USDT") or symbol.endswith("USDC") else symbol
+            mult, clean_base = parse_base_multiplier(base_coin)
+            spot_sym = f"{clean_base}USDT"
+
+            spot_tickers, _ = bybit_client.get_spot_market_data()
+            spot_ticker = next((t for t in spot_tickers if t.get("symbol") == spot_sym), {})
+            spot_price = safe_float(spot_ticker.get("lastPrice")) * mult
+
+            size_info = executor.parse_execution_size(
+                symbol=symbol,
+                amount_usd=args.amount_usd or (10000.0 if not args.amount_qty else None),
+                amount_qty=args.amount_qty,
+                spot_price=spot_price,
+                perp_price=perp_price
+            )
+
+            spot_book = bybit_client.get_orderbook("spot", spot_sym, limit=200)
+            perp_book = bybit_client.get_orderbook("linear", symbol, limit=200)
+
+            spot_asks = [(safe_float(px)*mult, safe_float(sz)/mult) for px, sz in spot_book.get("a", [])]
+            spot_bids = [(safe_float(px)*mult, safe_float(sz)/mult) for px, sz in spot_book.get("b", [])]
+            perp_asks = [(safe_float(px), safe_float(sz)) for px, sz in perp_book.get("a", [])]
+            perp_bids = [(safe_float(px), safe_float(sz)) for px, sz in perp_book.get("b", [])]
+
+            spot_mid = (spot_asks[0][0] + spot_bids[0][0]) / 2.0 if spot_asks and spot_bids else spot_price
+            perp_mid = (perp_asks[0][0] + perp_bids[0][0]) / 2.0 if perp_asks and perp_bids else perp_price
+
+            try_run_plan = executor.generate_try_run_plan(
+                symbol=symbol,
+                spot_symbol=spot_sym,
+                multiplier=mult,
+                target_usd=size_info["target_usd"],
+                spot_qty=size_info["spot_qty"],
+                perp_contracts_qty=size_info["perp_contracts_qty"],
+                hourly_funding=hourly_funding,
+                spot_asks=spot_asks,
+                spot_bids=spot_bids,
+                spot_mid_px=spot_mid,
+                perp_asks=perp_asks,
+                perp_bids=perp_bids,
+                perp_mid_px=perp_mid,
+                max_slippage_pct=args.max_slippage,
+                max_payback_hours=args.max_payback,
+                force=force
+            )
 
         payload = {
             "mode": "DRY-RUN" if dry_run else "LIVE",

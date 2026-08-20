@@ -275,7 +275,7 @@ function renderTable() {
                 <td>
                     <button class="btn-action" onclick="openHistoryModal('${item.coin}')">📊 历史</button>
                     <button class="btn-action btn-depth" onclick="openDepthModal('${item.exchange}', '${item.coin}', '${item.raw_spot_pair || item.spot_symbol}')">⚖️ 容量</button>
-                    <button class="btn-action btn-build" onclick="openBuildModal('${item.coin}', '${item.spot_symbol}')">🚀 建仓</button>
+                    <button class="btn-action btn-build" onclick="openBuildModal('${item.exchange}', '${item.coin}', '${item.spot_symbol}', '${item.raw_spot_pair || ''}')">🚀 建仓</button>
                 </td>
             </tr>
         `;
@@ -637,8 +637,10 @@ function renderModalTable(records) {
 // ----------------------------------------------------
 // Build Arbitrage & Risk Guard Logic
 // ----------------------------------------------------
+let currentBuildExchange = "bybit";
 let currentBuildSymbol = "";
 let currentBuildSpotSymbol = "";
+let currentBuildRawSpotPair = "";
 
 function initBuildModalListeners() {
     const modal = document.getElementById("build-modal");
@@ -670,13 +672,16 @@ function initBuildModalListeners() {
 
 document.addEventListener("DOMContentLoaded", initBuildModalListeners);
 
-function openBuildModal(symbol, spotSymbol) {
+function openBuildModal(exchange, symbol, spotSymbol, rawSpotPair) {
+    currentBuildExchange = exchange || "bybit";
     currentBuildSymbol = symbol;
     currentBuildSpotSymbol = spotSymbol || symbol;
+    currentBuildRawSpotPair = rawSpotPair || "";
 
+    const exchName = currentBuildExchange.toLowerCase().includes("hyperliquid") ? "Hyperliquid" : "Bybit";
     const modal = document.getElementById("build-modal");
-    document.getElementById("build-modal-title").textContent = `🚀 Bybit Delta 中性套利建仓演练与风控 - ${symbol}`;
-    document.getElementById("build-modal-subtitle").textContent = `Spot: ${currentBuildSpotSymbol} | Perp: ${symbol}`;
+    document.getElementById("build-modal-title").textContent = `🚀 ${exchName} Delta 中性套利建仓演练与风控 - ${symbol}`;
+    document.getElementById("build-modal-subtitle").textContent = `Exchange: ${exchName} | Spot: ${currentBuildSpotSymbol} | Perp: ${symbol}`;
 
     modal.classList.remove("hidden");
     fetchAndRenderBuildTryRun();
@@ -696,7 +701,8 @@ async function fetchAndRenderBuildTryRun() {
     const amountVal = parseFloat(document.getElementById("build-amount-input").value) || 10000;
     const force = document.getElementById("chk-force-override").checked;
 
-    let url = `/api/bybit/build-arbitrage?symbol=${currentBuildSymbol}&dry_run=true&force=${force}`;
+    const exchParam = currentBuildExchange.toLowerCase().includes("hyperliquid") ? "hyperliquid" : "bybit";
+    let url = `/api/build-arbitrage?exchange=${exchParam}&symbol=${currentBuildSymbol}&spot_symbol=${currentBuildSpotSymbol}&raw_spot_pair=${currentBuildRawSpotPair}&dry_run=true&force=${force}`;
     if (isUsd) {
         url += `&amount_usd=${amountVal}`;
     } else {

@@ -314,6 +314,105 @@ class TestFundingRateCalculator(unittest.TestCase):
         self.assertAlmostEqual(res_tt["fees"]["base_fee_pct"], 0.105)
         self.assertAlmostEqual(res_tt["fees"]["fee_savings_pct"], 0.0)
 
+    def test_classify_hyperliquid_tokens(self):
+        from src.calculator import classify_hyperliquid_token
+
+        # 1. Canonical (PURR)
+        purr_token = {
+            "name": "PURR", "isCanonical": True, "tokenId": "0xc1fb593a",
+            "evmContract": {"address": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e"},
+            "deployerTradingFeeShare": "0.0"
+        }
+        purr_pair = {"name": "PURR/USDC", "raw_pair_name": "PURR/USDC", "isCanonical": True}
+        c_purr = classify_hyperliquid_token(purr_token, purr_pair, "PURR", 1.0)
+        self.assertEqual(c_purr["origin_type"], "OFFICIAL_CANONICAL")
+        self.assertTrue(c_purr["is_canonical"])
+        self.assertTrue(c_purr["has_evm"])
+        self.assertIn("官方 Canonical", c_purr["origin_badge"])
+        self.assertIn("50% 折算率", c_purr["collateral_status"])
+
+        # 2. Native HYPE
+        hype_token = {"name": "HYPE", "isCanonical": False, "tokenId": "0x0d01", "evmContract": {"address": "0x0d0167"}}
+        hype_pair = {"name": "@107", "raw_pair_name": "@107"}
+        c_hype = classify_hyperliquid_token(hype_token, hype_pair, "HYPE", 1.0)
+        self.assertEqual(c_hype["origin_type"], "NATIVE_HYPE")
+        self.assertIn("原生 HYPE", c_hype["origin_badge"])
+        self.assertTrue(c_hype["has_evm"])
+
+        # 3. Unit Bridged (UBTC)
+        ubtc_token = {"name": "UBTC", "isCanonical": False}
+        ubtc_pair = {"name": "@142", "raw_pair_name": "@142"}
+        c_ubtc = classify_hyperliquid_token(ubtc_token, ubtc_pair, "BTC", 1.0)
+        self.assertEqual(c_ubtc["origin_type"], "UNIT_BRIDGED")
+        self.assertIn("Unit 映射", c_ubtc["origin_badge"])
+        self.assertIn("全款现货对冲", c_ubtc["collateral_status"])
+
+        # 4. HyBridge (XMR1)
+        xmr_token = {"name": "XMR1", "isCanonical": False}
+        xmr_pair = {"name": "@260", "raw_pair_name": "@260"}
+        c_xmr = classify_hyperliquid_token(xmr_token, xmr_pair, "XMR", 1.0)
+        self.assertEqual(c_xmr["origin_type"], "HYBRIDGE_BRIDGED")
+        self.assertIn("跨链桥接", c_xmr["origin_badge"])
+
+        # 5. HIP-1 Community Permissionless (AZTEC)
+        aztec_token = {"name": "AZTEC", "isCanonical": False, "deployerTradingFeeShare": "0.05"}
+        aztec_pair = {"name": "@285", "raw_pair_name": "@285"}
+        c_aztec = classify_hyperliquid_token(aztec_token, aztec_pair, "AZTEC", 1.0)
+        self.assertEqual(c_aztec["origin_type"], "HIP1_PERMISSIONLESS")
+        self.assertIn("HIP-1 无许可", c_aztec["origin_badge"])
+        self.assertEqual(c_aztec["deployer_fee_share_pct"], 5.0)
+
+        # 6. Multiplier Contract (kBONK)
+        kbonk_token = {"name": "UBONK", "isCanonical": False}
+        kbonk_pair = {"name": "@194", "raw_pair_name": "@194"}
+        c_kbonk = classify_hyperliquid_token(kbonk_token, kbonk_pair, "kBONK", 1000.0)
+        self.assertIn("🔢 1000x 乘数", c_kbonk["origin_tags"])
+
+    def test_classify_bybit_tokens(self):
+        from src.calculator import classify_bybit_token
+
+        # 1. Official Linear
+        c_btc = classify_bybit_token("BTCUSDT", "BTCUSDT", 1.0)
+        self.assertEqual(c_btc["origin_type"], "BYBIT_OFFICIAL_LINEAR")
+        self.assertIn("官方正向", c_btc["origin_badge"])
+
+        # 2. Multiplier
+        c_pepe = classify_bybit_token("1000PEPEUSDT", "PEPEUSDT", 1000.0)
+        self.assertEqual(c_pepe["origin_type"], "BYBIT_MULTIPLIER")
+        self.assertIn("1000x 乘数", c_pepe["origin_badge"])
+
+    def test_match_and_calculate_metadata_injection(self):
+        perp_universe = [{"name": "PURR"}, {"name": "BTC"}]
+        perp_ctxs = [
+            {"funding": "0.0001", "markPx": "0.20", "midPx": "0.20", "dayNtlVlm": "500000"},
+            {"funding": "0.00005", "markPx": "60000.0", "midPx": "60000.0", "dayNtlVlm": "5000000"}
+        ]
+        spot_tokens = [
+            {"name": "USDC", "index": 0, "isCanonical": True},
+            {"name": "PURR", "index": 1, "isCanonical": True, "evmContract": {"address": "0xpurr"}},
+            {"name": "UBTC", "index": 2, "isCanonical": False}
+        ]
+        spot_universe = [
+            {"tokens": [1, 0], "name": "PURR/USDC", "isCanonical": True},
+            {"tokens": [2, 0], "name": "@142", "isCanonical": False}
+        ]
+        spot_ctxs = [
+            {"midPx": "0.20", "dayNtlVlm": "100000"},
+            {"midPx": "60000.0", "dayNtlVlm": "300000"}
+        ]
+
+        res = self.calc.match_and_calculate(perp_universe, perp_ctxs, spot_tokens, spot_universe, spot_ctxs)
+        self.assertEqual(len(res), 2)
+        purr_item = next(r for r in res if r["coin"] == "PURR")
+        self.assertEqual(purr_item["origin_type"], "OFFICIAL_CANONICAL")
+        self.assertTrue(purr_item["has_evm"])
+        self.assertEqual(purr_item["evm_address"], "0xpurr")
+        self.assertIn("官方 Canonical", purr_item["origin_badge"])
+
+        btc_item = next(r for r in res if r["coin"] == "BTC")
+        self.assertEqual(btc_item["origin_type"], "UNIT_BRIDGED")
+        self.assertEqual(btc_item["raw_spot_pair"], "@142")
+
 if __name__ == "__main__":
     unittest.main()
 

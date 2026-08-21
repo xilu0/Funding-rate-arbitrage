@@ -23,15 +23,16 @@ except ImportError:
             return self.text
 
     class Panel:
-        def __init__(self, renderable, title=None, subtitle=None):
+        def __init__(self, renderable, title=None, subtitle=None, border_style=None):
             self.renderable = str(renderable)
             self.title = title
             self.subtitle = subtitle
+            self.border_style = border_style
         def __str__(self):
             out = []
-            clean_title = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', self.title) if self.title else None
-            clean_body = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', self.renderable)
-            clean_sub = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', self.subtitle) if self.subtitle else None
+            clean_title = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', str(self.title)) if self.title else None
+            clean_body = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', str(self.renderable))
+            clean_sub = re.sub(r'\[/?[a-zA-Z0-9_ #]+\]', '', str(self.subtitle)) if self.subtitle else None
             if clean_title:
                 out.append(f"\n==================== {clean_title} ====================")
             out.append(clean_body)
@@ -82,11 +83,38 @@ from src.calculator import (
     DEFAULT_BYBIT_PERP_TAKER_FEE
 )
 
+def render_domain_guide_cli() -> Panel:
+    """Renders comprehensive domain knowledge and arbitrage risk management guide in terminal."""
+    guide_text = (
+        "[bold cyan]📚 Hyperliquid & Bybit 套利业务知识与风控速查手册 (Domain Knowledge Guide)[/bold cyan]\n\n"
+        "[bold yellow]一、 Hyperliquid 标的来源性质分类详解：[/bold yellow]\n"
+        "  1. [bold cyan][🏛️ 官方 Canonical][/bold cyan]: 官方创世/原生资产 (如 PURR, USDC)。\n"
+        "     • 特点：由官方验证节点统一定价预言机，流动性充裕，在 Portfolio Margin 账户中享有 50% 质押折算率 (Scheme D 核心标的)。\n"
+        "  2. [bold cyan][🏛️ 原生 HYPE][/bold cyan]: Hyperliquid L1 核心代币。\n"
+        "     • 特点：流动性极佳，现货质押+永续对冲的核心标的。\n"
+        "  3. [bold yellow][🌉 Unit 映射][/bold yellow]: Unit Protocol 封装映射资产 (如 UBTC, UETH, USOL, UZEC, UENA, UFART, UPUMP, UUUSPX, UBONK)。\n"
+        "     • 特点：解决 L1 现货匮乏问题，适合 1:1 全款现货持有对冲；目前在账户中作为独立现货持仓 (非跨资产质押品)。\n"
+        "  4. [bold blue][🌉 跨链桥接][/bold blue]: HyBridge / Wagyu 桥接资产 (如 LINK0, AAVE0, XMR1, BNB1, CFX0)。\n"
+        "     • 特点：跨链封装资产，开仓前需关注跨链深度与现货-永续基差 (Spread)。\n"
+        "  5. [bold magenta][⚡ HIP-1 发币][/bold magenta]: 社区无许可发币 (如 AZTEC, @260, @107 等)。\n"
+        "     • 特点：荷兰拍/联合曲线创建，开仓务必核对底层真实 Pair ID (如 @260) 谨防同名碰撞，并关注部署者手续费分成与抛压。\n"
+        "  6. [bold green][⛓️ HyperEVM][/bold green]: 具备 HyperEVM 智能合约地址，支持 EVM 生态双向流转。\n"
+        "  7. [bold dim][🔢 1000x 乘数][/bold dim]: 1张合约对应 1000 个现货 Token (如 kBONK, 1000PEPE)，张数须除以乘数。\n\n"
+        "[bold yellow]二、 核心量化指标与套利风控准则：[/bold yellow]\n"
+        "  • [bold green]1小时资金费率[/bold green]: 永续合约每小时结算比率。Simple APR = Rate × 24 × 365 × 100%。\n"
+        "  • [bold green]回本时间 (Payback Hours)[/bold green]: 开仓/双边手续费被资金费率收益覆盖所需时长 (建议 <= 48h)。\n"
+        "  • [bold green]基差 (Basis Spread)[/bold green]: (永续价格 - 现货价格) / 现货价格。正基差有利，严禁大幅负基差入场。\n"
+        "  • [bold green]Hyperliquid 方案 D (Scheme D)[/bold green]: 90% 现货质押 + 90% 永续做空 + 10% USDC 现金缓冲 + 强平线 > +109.6%。\n"
+        "  • [bold green]Maker-Taker 触发式对冲[/bold green]: 现货挂单 (Post-Only) + 永续市价 (IOC) 触发对冲，节省 50%~70% 手续费摩擦。"
+    )
+    return Panel(guide_text, title="[bold cyan]💡 业务名词与套利风控指南 (Cheat Sheet)[/bold cyan]", border_style="cyan")
+
+
 def render_cli_table(data: list, 
                      spot_fee_pct: float, 
                      perp_fee_pct: float, 
                      limit: Optional[int] = None) -> Table:
-    """Renders a Rich ASCII table of funding rates and payback times."""
+    """Renders a Rich ASCII table of funding rates and payback times with token origins."""
     table = Table(title="🚀 Capital Spot & Perp Funding Rate Arbitrage Monitor", 
                   title_style="bold cyan", 
                   header_style="bold magenta", 
@@ -96,6 +124,8 @@ def render_cli_table(data: list,
     table.add_column("Exchange", justify="center", style="bold cyan")
     table.add_column("Asset", justify="left", style="bold yellow")
     table.add_column("Spot Pair", justify="left", style="green")
+    table.add_column("Origin / 性质", justify="center")
+    table.add_column("Pair ID", justify="center", style="dim")
     table.add_column("Hourly Rate", justify="right")
     table.add_column("APR (Simple)", justify="right", style="bold green")
     table.add_column("APY (Compound)", justify="right", style="green")
@@ -135,11 +165,31 @@ def render_cli_table(data: list,
 
         exch_badge = f"[bold cyan]HL[/bold cyan]" if item.get("exchange") == "Hyperliquid" else f"[bold yellow]Bybit[/bold yellow]"
 
+        origin_badge = item.get("origin_badge", "")
+        if "官方" in origin_badge:
+            origin_cell = f"[bold cyan]{origin_badge}[/bold cyan]"
+        elif "Unit" in origin_badge:
+            origin_cell = f"[bold yellow]{origin_badge}[/bold yellow]"
+        elif "HIP-1" in origin_badge:
+            origin_cell = f"[bold magenta]{origin_badge}[/bold magenta]"
+        elif "桥接" in origin_badge:
+            origin_cell = f"[bold blue]{origin_badge}[/bold blue]"
+        elif "乘数" in origin_badge:
+            origin_cell = f"[dim]{origin_badge}[/dim]"
+        else:
+            origin_cell = origin_badge
+
+        raw_id = item.get("raw_pair_id") or item.get("raw_spot_pair") or item.get("spot_pair") or ""
+        if item.get("has_evm"):
+            raw_id = f"{raw_id} [cyan][EVM][/cyan]"
+
         table.add_row(
             str(i),
             exch_badge,
             item["coin"],
             f"{item['spot_symbol']} ({item['spot_pair']})",
+            origin_cell,
+            raw_id,
             hr_cell,
             apr_str,
             apy_str,
@@ -393,6 +443,7 @@ def main():
     parser.add_argument("--no-alias", action="store_true", help="Disable token alias matching (e.g. UBTC->BTC)")
     parser.add_argument("--limit", type=int, default=None, help="Limit CLI table output rows")
     parser.add_argument("--json", action="store_true", help="Fetch once and output JSON to stdout")
+    parser.add_argument("--guide", action="store_true", help="Show comprehensive domain knowledge and arbitrage risk management guide")
     parser.add_argument("--version", "-v", action="store_true", help="Show application version and diagnostic info")
     parser.add_argument("--hl-check", action="store_true", help="Run Hyperliquid API Wallet verification & canary diagnostic")
     parser.add_argument("--hl-status", action="store_true", help="Show Hyperliquid Scheme D portfolio status & risk tier")
@@ -401,6 +452,11 @@ def main():
     parser.add_argument("--gopass", "-g", type=str, default=None, help="Gopass secret path (e.g. trading/hyperliquid/mainnet)")
 
     args = parser.parse_args()
+
+    if args.guide:
+        console = Console()
+        console.print(render_domain_guide_cli())
+        return
 
     if args.version:
         if args.json:
@@ -729,6 +785,16 @@ def main():
         footer_text = Text(f"Snapshot taken: {timestamp} UTC | Monitored Pairs: {len(results)} | Fees: Spot Taker {calculator.spot_taker_fee*100:.3f}%, Perp Taker {calculator.perp_taker_fee*100:.3f}%", style="dim italic")
         panel = Panel(table, subtitle=footer_text)
         console.print(panel)
+
+        legend_text = (
+            "[bold cyan][🏛️ 官方 Canonical][/bold cyan] 官方创世/原生资产 (支持50%质押) | "
+            "[bold yellow][🌉 Unit 映射][/bold yellow] 外部资产封装映射 (全款对冲) | "
+            "[bold blue][🌉 跨链桥接][/bold blue] 跨链桥封装资产 | "
+            "[bold magenta][⚡ HIP-1 发币][/bold magenta] 社区无许可发币 (核对Pair ID防撞车) | "
+            "[dim][🔢 1000x][/dim] 乘数合约 | [cyan][EVM][/cyan] 具备EVM合约\n"
+            "[dim]💡 提示: 运行 [bold]python3 monitor.py --guide[/bold] 可查看详细套利业务手册与风控准则。[/dim]"
+        )
+        console.print(Panel(legend_text, title="[bold cyan]💡 标的来源性质图例与业务提示[/bold cyan]", border_style="dim cyan"))
 
 if __name__ == "__main__":
     main()

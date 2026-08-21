@@ -1,7 +1,7 @@
 import os
 import json
 import urllib.parse
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
 from src.hyperliquid_client import HyperliquidClient
@@ -27,11 +27,21 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=WEB_DIR, **kwargs)
 
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if path == "/api/funding-rates":
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+        elif path == "/api/funding-rates":
             self.handle_api_funding_rates(parsed.query)
         elif path in ["/api/funding-history", "/api/bybit/funding-history", "/api/hyperliquid/funding-history"]:
             self.handle_api_funding_history(parsed.query, requested_path=path)
@@ -599,61 +609,63 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             max_spread_pct=max_spread_pct
         )
 
-        try:
-            results: List[Dict[str, Any]] = []
+        results: List[Dict[str, Any]] = []
+        warnings: List[str] = []
 
-            # 1. Hyperliquid
-            if exchange in ["hyperliquid", "all", "hl"]:
-                if self.hl_client:
-                    perp_univ, perp_ctxs = self.hl_client.get_perp_market_data()
-                    spot_toks, spot_univ, spot_ctxs = self.hl_client.get_spot_market_data()
-                    hl_results = calc.match_and_calculate(
-                        perp_univ, perp_ctxs, spot_toks, spot_univ, spot_ctxs
-                    )
-                    results.extend(hl_results)
+        # 1. Hyperliquid
+        if exchange in ["hyperliquid", "all", "hl"]:
+            if not self.hl_client:
+                self.hl_client = HyperliquidClient()
+            try:
+                perp_univ, perp_ctxs = self.hl_client.get_perp_market_data()
+                spot_toks, spot_univ, spot_ctxs = self.hl_client.get_spot_market_data()
+                hl_results = calc.match_and_calculate(
+                    perp_univ, perp_ctxs, spot_toks, spot_univ, spot_ctxs
+                )
+                results.extend(hl_results)
+            except Exception as e:
+                warnings.append(f"Hyperliquid: {str(e)}")
 
-            # 2. Bybit
-            if exchange in ["bybit", "all"]:
-                if self.bybit_client:
-                    linear_tickers, linear_insts = self.bybit_client.get_linear_market_data()
-                    spot_tickers, spot_insts = self.bybit_client.get_spot_market_data()
-                    bybit_results = calc.match_and_calculate_bybit(
-                        linear_tickers, spot_tickers, linear_insts, spot_insts
-                    )
-                    results.extend(bybit_results)
+        # 2. Bybit
+        if exchange in ["bybit", "all"]:
+            if not self.bybit_client:
+                self.bybit_client = BybitClient()
+            try:
+                linear_tickers, linear_insts = self.bybit_client.get_linear_market_data()
+                spot_tickers, spot_insts = self.bybit_client.get_spot_market_data()
+                bybit_results = calc.match_and_calculate_bybit(
+                    linear_tickers, spot_tickers, linear_insts, spot_insts
+                )
+                results.extend(bybit_results)
+            except Exception as e:
+                warnings.append(f"Bybit: {str(e)}")
 
-            # Sort combined results descending by hourly funding rate
-            results.sort(key=lambda x: x["hourly_funding"], reverse=True)
+        # Sort combined results descending by hourly funding rate
+        results.sort(key=lambda x: x.get("hourly_funding", 0.0), reverse=True)
 
-            payload = {
-                "status": "success",
+        payload = {
+            "status": "success",
+            "exchange": exchange,
+            "count": len(results),
+            "warnings": warnings if warnings else None,
+            "params": {
                 "exchange": exchange,
-                "count": len(results),
-                "params": {
-                    "exchange": exchange,
-                    "spot_fee_pct": spot_fee_pct,
-                    "perp_fee_pct": perp_fee_pct,
-                    "entry_fee_pct": spot_fee_pct + perp_fee_pct,
-                    "roundtrip_fee_pct": (spot_fee_pct + perp_fee_pct) * 2.0,
-                    "enable_aliases": enable_aliases
-                },
-                "data": results
-            }
+                "spot_fee_pct": spot_fee_pct,
+                "perp_fee_pct": perp_fee_pct,
+                "entry_fee_pct": spot_fee_pct + perp_fee_pct,
+                "roundtrip_fee_pct": (spot_fee_pct + perp_fee_pct) * 2.0,
+                "enable_aliases": enable_aliases
+            },
+            "data": results
+        }
 
-            response_bytes = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(response_bytes)))
-            self.end_headers()
-            self.wfile.write(response_bytes)
-        except Exception as e:
-            err_payload = {"status": "error", "message": str(e)}
-            err_bytes = json.dumps(err_payload).encode("utf-8")
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(err_bytes)
+        response_bytes = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(response_bytes)))
+        self.end_headers()
+        self.wfile.write(response_bytes)
 
 def start_web_server(port: int, 
                      hl_client: HyperliquidClient, 
@@ -664,10 +676,12 @@ def start_web_server(port: int,
     ArbitrageServerHandler.bybit_client = bybit_client
     ArbitrageServerHandler.calculator = calculator
 
-    server = HTTPServer(("0.0.0.0", port), ArbitrageServerHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), ArbitrageServerHandler)
     print(f"===========================================================")
     print(f"🔥 Capital Funding Rate Arbitrage Monitor Web Dashboard Live!")
-    print(f"👉 Access UI at: http://localhost:{port}")
+    print(f"👉 本地访问 (Local):   http://localhost:{port}")
+    print(f"👉 远程访问 (Remote):  http://35.75.35.2:{port}")
+    print(f"💡 SSH端口映射 (Tunnel): ssh -L {port}:localhost:{port} user@35.75.35.2")
     print(f"===========================================================")
 
     try:

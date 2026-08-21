@@ -4,10 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>全网现货与U本位永续套利资金费率监控</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+    <link rel="stylesheet" href="style.css?v=2.2">
 </head>
 <body>
     <div class="app-container">
@@ -17,15 +15,20 @@
                 <div class="logo-badge">⚡</div>
                 <div>
                     <h1>全网现货与U本位永续套利资金费率监控</h1>
-                    <p class="subtitle">实时监控 Hyperliquid 与 Bybit 现货 & U本位永续合约 | 资金费率排序 | 市价单手续费回本预测</p>
+                    <p class="subtitle">实时监控 Hyperliquid 与 Bybit 现货 & U本位永续合约 | 资金费率排序 | 标的来源性质分类 | 业务知识提示</p>
                 </div>
             </div>
-            <div class="header-status">
-                <div class="status-indicator">
-                    <span class="pulse-dot"></span>
-                    <span id="sync-status">实时连接中...</span>
+            <div class="header-actions">
+                <button id="btn-knowledge-guide" class="btn-guide-pill" title="查看资金费率、标的性质与套利风控速查手册">
+                    💡 业务知识与风控指南
+                </button>
+                <div class="header-status">
+                    <div class="status-indicator">
+                        <span class="pulse-dot"></span>
+                        <span id="sync-status">实时连接中...</span>
+                    </div>
+                    <div class="last-update" id="last-update-time">--:--:--</div>
                 </div>
-                <div class="last-update" id="last-update-time">--:--:--</div>
             </div>
         </header>
 
@@ -70,7 +73,7 @@
             <div class="filter-group">
                 <div class="search-box">
                     <span class="search-icon">🔍</span>
-                    <input type="text" id="search-input" placeholder="搜索币种名称 (如 HYPE, BTC, PEPE, RATS)...">
+                    <input type="text" id="search-input" placeholder="搜索币种名称 (如 HYPE, PURR, BTC, UBTC, XMR)...">
                 </div>
             </div>
 
@@ -81,6 +84,26 @@
                         <option value="all" selected>全部 (Hyperliquid + Bybit)</option>
                         <option value="hyperliquid">Hyperliquid</option>
                         <option value="bybit">Bybit</option>
+                    </select>
+                </div>
+                <div class="config-item">
+                    <label for="origin-type-select">标的来源性质</label>
+                    <select id="origin-type-select">
+                        <option value="all" selected>全部性质 (All Origins)</option>
+                        <optgroup label="── Hyperliquid 标的体系 ──">
+                            <option value="hl_official">🏛️ HL 官方原生 (Canonical / HYPE)</option>
+                            <option value="hl_unit">🌉 HL Unit 跨链映射 (UBTC, UETH, UZEC...)</option>
+                            <option value="hl_hybridge">🌉 HL HyBridge 桥接 (XMR1, LINK0, BNB1...)</option>
+                            <option value="hl_hip1">⚡ HL HIP-1 社区无许可发币 (AZTEC, @285...)</option>
+                            <option value="evm">⛓️ 具备 HyperEVM 智能合约</option>
+                        </optgroup>
+                        <optgroup label="── Bybit 标的体系 ──">
+                            <option value="bybit_linear">🏛️ Bybit 官方标准永续合约</option>
+                        </optgroup>
+                        <optgroup label="── 特殊机制 ──">
+                            <option value="multiplier">🔢 乘数合约 (1000x / k-prefix)</option>
+                            <option value="all_official">🏛️ 全部官方原生标的 (HL + Bybit)</option>
+                        </optgroup>
                     </select>
                 </div>
                 <div class="config-item">
@@ -134,8 +157,9 @@
                         <tr>
                             <th data-sort="rank" class="sortable">排名</th>
                             <th data-sort="exchange" class="sortable">交易所</th>
-                            <th data-sort="coin" class="sortable">币种</th>
-                            <th data-sort="spot_pair" class="sortable">现货交易对</th>
+                            <th data-sort="coin" class="sortable">标的币种</th>
+                            <th data-sort="origin_type" class="sortable">来源性质 / 机制</th>
+                            <th data-sort="spot_pair" class="sortable">现货交易对 (Pair ID)</th>
                             <th data-sort="hourly_funding" class="sortable desc">1小时资金费率 ▲</th>
                             <th data-sort="apr_pct" class="sortable">年化利率 (APR)</th>
                             <th data-sort="apy_pct" class="sortable">复利年化 (APY)</th>
@@ -149,7 +173,7 @@
                     </thead>
                     <tbody id="table-body">
                         <tr>
-                            <td colspan="13" class="loading-cell">正在获取最新行情数据...</td>
+                            <td colspan="14" class="loading-cell">正在获取最新行情数据...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -411,7 +435,178 @@
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <!-- Knowledge Base & Risk Management Modal -->
+    <div id="knowledge-modal" class="modal-overlay hidden">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <div class="modal-title-area">
+                    <h3>💡 全网现货与永续资金费率套利业务知识与风控指南</h3>
+                    <span class="modal-subtitle">Hyperliquid 现货质押 & 对冲套利量化系统核心业务速查手册</span>
+                </div>
+                <button id="knowledge-modal-close-btn" class="btn-close">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- Guide Navigation Tabs -->
+                <div class="guide-tabs">
+                    <button class="guide-tab-btn active" data-tab="tab-origins">🏛️ 1. Hyperliquid 标的体系</button>
+                    <button class="guide-tab-btn" data-tab="tab-formulas">📊 2. 核心量化指标与算式</button>
+                    <button class="guide-tab-btn" data-tab="tab-schemed">🛡️ 3. 方案 D 质押套利法则</button>
+                    <button class="guide-tab-btn" data-tab="tab-makertaker">⚡ 4. Maker-Taker 省费秘籍</button>
+                </div>
+
+                <!-- Tab 1: Token Origins & Classification -->
+                <div id="tab-origins" class="guide-tab-pane active">
+                    <div class="guide-section">
+                        <h4>Hyperliquid 现货与合约标的来源性质分类速查</h4>
+                        <p class="guide-desc">Hyperliquid 拥有独特的 L1 混合代币架构（官方原生、社区 HIP-1、Unit 映射与跨链桥）。不同性质的标的在流动性、预言机安全性及质押属性上存在重大差异：</p>
+                        
+                        <div class="guide-cards-grid">
+                            <div class="guide-card border-cyan">
+                                <div class="guide-card-header">
+                                    <span class="badge-origin badge-canonical">🏛️ 官方 Canonical 原生</span>
+                                    <span class="guide-pill pill-green">最高安全级 / 支持质押</span>
+                                </div>
+                                <p><b>典型代表:</b> <code>PURR</code>, <code>USDC</code>, <code>HYPE</code></p>
+                                <p><b>底层机制:</b> Hyperliquid 官方创世部署或核心原生代币 (<code>isCanonical=true</code>)。官方验证节点统一定价预言机，流动性充裕，无虚假碰撞风险。</p>
+                                <p><b>套利实操:</b> 在 Portfolio Margin 账户中享有 <b>50% 官方质押折算率</b>，是运行【方案 D】现货质押对冲的标准核心标的。</p>
+                            </div>
+
+                            <div class="guide-card border-yellow">
+                                <div class="guide-card-header">
+                                    <span class="badge-origin badge-unit">🌉 Unit Protocol 封装映射</span>
+                                    <span class="guide-pill pill-yellow">主流封装 / 现货对冲</span>
+                                </div>
+                                <p><b>典型代表:</b> <code>UBTC</code>, <code>UETH</code>, <code>USOL</code>, <code>UZEC</code>, <code>UENA</code>, <code>UFART</code>, <code>UPUMP</code>, <code>UBONK</code></p>
+                                <p><b>底层机制:</b> Unit Protocol 协议在 Hyperliquid L1 发行的跨链资产封装代币（统一以 <code>U-</code> 为前缀）。</p>
+                                <p><b>套利实操:</b> 解决 L1 原生现货匮乏问题，适合 <b>1:1 现货全款持有对冲</b>。目前在账户中作为独立现货持仓（非跨资产质押品），需关注 Unit 铸造/赎回流动性。</p>
+                            </div>
+
+                            <div class="guide-card border-blue">
+                                <div class="guide-card-header">
+                                    <span class="badge-origin badge-bridged">🌉 HyBridge 跨链桥接</span>
+                                    <span class="guide-pill pill-blue">跨链映射 / 关注基差</span>
+                                </div>
+                                <p><b>典型代表:</b> <code>LINK0</code>, <code>AAVE0</code>, <code>XMR1</code>, <code>BNB1</code>, <code>CFX0</code></p>
+                                <p><b>底层机制:</b> 通过 HyBridge / Wagyu 桥接至 Hyperliquid L1 的资产，名称后通常带有数字后缀（如 <code>0</code> 或 <code>1</code>）。</p>
+                                <p><b>套利实操:</b> 需关注跨链桥深度与跨链桥安全；开仓前必须核对现货与永续之间的基差（Basis Spread），防止滑点摩擦。</p>
+                            </div>
+
+                            <div class="guide-card border-magenta">
+                                <div class="guide-card-header">
+                                    <span class="badge-origin badge-hip1">⚡ HIP-1 社区无许可发币</span>
+                                    <span class="guide-pill pill-red">社区创建 / 防撞车</span>
+                                </div>
+                                <p><b>典型代表:</b> <code>AZTEC</code>, <code>@260</code>, <code>@107</code>, <code>HFUN</code></p>
+                                <p><b>底层机制:</b> 社区通过 Hyperliquid L1 HIP-1 荷兰拍/联合曲线标准无许可发行的代币 (<code>isCanonical=false</code>)，底层交易对为 <code>@&lt;index&gt;</code>。</p>
+                                <p><b>套利风控:</b> <b>⚠️ 极度警惕同名模因币碰撞</b>！开仓前务必核对底层真实 Pair ID；需关注部署者手续费分成 (<code>deployerFeeShare</code>) 与潜在抛压。</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Formulas & Metrics -->
+                <div id="tab-formulas" class="guide-tab-pane">
+                    <div class="guide-section">
+                        <h4>核心量化指标与算式解析</h4>
+                        <div class="formula-grid">
+                            <div class="formula-card">
+                                <h5>1. 资金费率与年化利率 (Funding Rate & APR)</h5>
+                                <ul>
+                                    <li><b>1小时资金费率 ($r_{1h}$):</b> Hyperliquid 采用 1 小时逐笔结算机制；Bybit 默认采用 8 小时结算机制 ($r_{1h} = r_{8h} / 8$)。</li>
+                                    <li><b>单利年化利率 (Simple APR):</b>
+                                        <div class="formula-box">$$\text{APR} = r_{1h} \times 24 \times 365 \times 100\%$$</div>
+                                    </li>
+                                    <li><b>复利年化收益 (Compound APY):</b>
+                                        <div class="formula-box">$$\text{APY} = \left((1 + r_{1h})^{8760} - 1\right) \times 100\%$$</div>
+                                    </li>
+                                </ul>
+                            </div>
+
+                            <div class="formula-card">
+                                <h5>2. 市价单手续费回本时间 (Payback Hours)</h5>
+                                <ul>
+                                    <li><b>单边开仓回本时长 (Entry Payback):</b>
+                                        <div class="formula-box">$$T_{\text{entry}} = \frac{\text{Fee}_{\text{Spot}} + \text{Fee}_{\text{Perp}}}{r_{1h}} \quad (\text{小时})$$</div>
+                                    </li>
+                                    <li><b>双边完整回本时长 (Roundtrip Payback):</b>
+                                        <div class="formula-box">$$T_{\text{roundtrip}} = \frac{2 \times (\text{Fee}_{\text{Spot}} + \text{Fee}_{\text{Perp}})}{r_{1h}} \quad (\text{小时})$$</div>
+                                    </li>
+                                    <li><b>风控卡口准则:</b> 优先选择完整回本时间 $\le 48\text{h}$ 的高资费标的，严禁入场回本时间 $> 72\text{h}$ 或负资费标的。</li>
+                                </ul>
+                            </div>
+
+                            <div class="formula-card">
+                                <h5>3. 基差偏离度 (Basis Spread)</h5>
+                                <ul>
+                                    <li><b>基差公式:</b>
+                                        <div class="formula-box">$$\text{Spread} = \frac{P_{\text{Perp}} - (P_{\text{Spot}} \times \text{Multiplier})}{P_{\text{Spot}} \times \text{Multiplier}} \times 100\%$$</div>
+                                    </li>
+                                    <li><b>正基差 ($>0$):</b> 永续价格高于现货价格。开仓（买现货+空永续）获得溢价保护，平仓时基差收敛带来额外利润。</li>
+                                    <li><b>负基差 ($<0$):</b> 严禁大幅负基差入场，否则平仓时基差收敛将侵蚀资金费率收益。</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 3: Scheme D Collateral Best Practices -->
+                <div id="tab-schemed" class="guide-tab-pane">
+                    <div class="guide-section">
+                        <h4>Hyperliquid 现货质押与合约对冲套利（方案 D）核心法则</h4>
+                        <div class="schemed-banner">
+                            <span class="schemed-badge">⚡ 方案 D (Scheme D) 黄金资金配比: 90% 现货质押 + 90% 永续做空 + 10% USDC 现金缓冲</span>
+                        </div>
+                        <div class="schemed-steps">
+                            <div class="schemed-step">
+                                <h5>1. 组合保证金 (Portfolio Margin) 账户准入</h5>
+                                <p>必须在 Hyperliquid 开通 Portfolio Margin 模式。门槛：账户资产 $\ge \$10,000$ 或历史累计交易量 $\ge \$5,000,000$。</p>
+                            </div>
+                            <div class="schemed-step">
+                                <h5>2. 50% 折价质押与强平线推导</h5>
+                                <p>现货 Token 按 50% 抵押率提供保证金。即使现货极端暴涨，空头亏损的同时现货质押价值也同步增长，系统经受得起 <b>$+109.6\%$ 的翻倍暴涨而绝不爆仓</b>。</p>
+                            </div>
+                            <div class="schemed-step">
+                                <h5>3. 三级阶梯动态调仓风控准则</h5>
+                                <ul>
+                                    <li><b>Level 1 (注入缓冲):</b> 保证金使用率 $>60\%$ 或强平距离 $<25\%$ $\to$ 将 10% 闲置 USDC 划转至永续子账户（0 手续费）。</li>
+                                    <li><b>Level 2 (等比例减仓):</b> 保证金使用率 $>75\%$ 或强平距离 $<15\%$ $\to$ 同步市价平掉 $25\%\sim 30\%$ 现货与永续仓位。</li>
+                                    <li><b>Level 3 (紧急熔断):</b> 强平距离 $<8\%$ $\to$ 立即强平 $\ge 50\%$ 仓位锁定本金。</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 4: Maker-Taker Trigger Execution -->
+                <div id="tab-makertaker" class="guide-tab-pane">
+                    <div class="guide-section">
+                        <h4>Maker-Taker 触发式对冲架构：如何降低 50%~70% 手续费摩擦</h4>
+                        <div class="makertaker-box">
+                            <div class="makertaker-flow">
+                                <div class="flow-step">
+                                    <span class="flow-badge">Leg 1: 现货腿</span>
+                                    <h6>Best Bid 被动挂单 (Post-Only / Alo)</h6>
+                                    <p>在现货买一价挂单，享受 Maker 极低费率 (0.015%)，避免买入滑点。</p>
+                                </div>
+                                <div class="flow-arrow">➔ 毫秒级触发 ➔</div>
+                                <div class="flow-step">
+                                    <span class="flow-badge">Leg 2: 永续腿</span>
+                                    <h6>IOC / Market 立即吃单做空</h6>
+                                    <p>现货成交瞬间触发永续 1:1 空单，锁定 Delta 中性，彻底消除单腿敞口风险。</p>
+                                </div>
+                            </div>
+                            <div class="makertaker-summary">
+                                <b>💡 效果对比:</b> 相比于现货市价+永续市价的全 Taker 方式（综合磨损 0.210%），Maker-Taker 架构将开仓费率压缩至 <b>0.050%</b>，回本时间直接缩短一半以上！
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js?v=2.2"></script>
 </body>
 </html>
 

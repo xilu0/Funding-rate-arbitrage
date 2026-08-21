@@ -39,6 +39,9 @@ $$0.477 \cdot \frac{P}{P_0} \ge 1.00 \implies P_{\text{liq}} = \frac{P_0}{0.477}
 ## 2. 标准入场与建仓流程 (SOP)
 
 ### 2.1 入场前置过滤 (Pre-flight Checks)
+0. **账户模式与资格门槛 (Account Mode & Eligibility)**：
+   - 必须激活 **Portfolio Margin（组合保证金模式）**（Unified / Standard 模式不支持跨币种现货质押）。
+   - **准入条件**：账户总净值 $\ge \$10,000$ 或 历史总交易量 $\ge \$5,000,000$（Beta 阶段同时要求账户价值 $<\$25\text{M}$）。
 1. **费率门槛**：
    - 7 天移动平均资金费率 $\ge 20\%$ Simple APR。
    - 进出场双边手续费回本周期（Payback Hours）$\le 48$ 小时。

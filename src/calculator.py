@@ -79,6 +79,118 @@ def parse_base_multiplier(base_coin: str) -> Tuple[float, str]:
     return 1.0, base_coin
 
 
+def classify_hyperliquid_token(base_token: dict, spot_pair: dict, perp_coin: str, multiplier: float = 1.0) -> dict:
+    """
+    Classifies a Hyperliquid token/contract by origin nature, deployment standard, and risk notes.
+    Distinguishes Canonical official assets, Native HYPE, Unit protocol synthetics,
+    HyBridge bridged assets, and HIP-1 permissionless tokens.
+    """
+    token_name = base_token.get("name", "") if isinstance(base_token, dict) else ""
+    is_canonical_token = bool(base_token.get("isCanonical", False)) if isinstance(base_token, dict) else False
+    is_canonical_pair = bool(spot_pair.get("is_canonical", False) or spot_pair.get("isCanonical", False)) if isinstance(spot_pair, dict) else False
+    evm_contract = base_token.get("evmContract") if isinstance(base_token, dict) else None
+    evm_address = evm_contract.get("address") if isinstance(evm_contract, dict) else None
+    token_id = base_token.get("tokenId", "") if isinstance(base_token, dict) else ""
+    deployer_fee_share = safe_float(base_token.get("deployerTradingFeeShare", "0") if isinstance(base_token, dict) else "0")
+    raw_pair_name = (spot_pair.get("raw_pair_name") or spot_pair.get("name") or "") if isinstance(spot_pair, dict) else ""
+
+    tags = []
+
+    # 1. Determine origin type
+    if is_canonical_token or token_name in ["PURR", "USDC"]:
+        origin_type = "OFFICIAL_CANONICAL"
+        origin_badge = "🏛️ 官方 Canonical"
+        origin_desc = "Hyperliquid 官方创世/原生资产，官方维护撮合与定价"
+        collateral_status = "支持质押 (50% 折算率，方案 D 核心标的)"
+        risk_note = "预言机最稳健，流动性充裕；在 Portfolio Margin 账户中享有 50% 质押折算率。"
+        tags.append("🏛️ 官方 Canonical")
+    elif token_name == "HYPE":
+        origin_type = "NATIVE_HYPE"
+        origin_badge = "🏛️ 原生 HYPE"
+        origin_desc = "Hyperliquid L1 原生核心生态资产"
+        collateral_status = "支持质押 (50% 折算率，方案 D 核心标的)"
+        risk_note = "Hyperliquid L1 核心代币，深度极佳；方案 D 现货质押核心标的。"
+        tags.append("🏛️ 原生 HYPE")
+    elif token_name.startswith("U") and token_name in COMMON_PREFIX_ALIASES:
+        origin_type = "UNIT_BRIDGED"
+        origin_badge = "🌉 Unit 映射"
+        origin_desc = f"Unit Protocol 在 Hyperliquid L1 封装映射的外部资产 ({perp_coin})"
+        collateral_status = "全款现货对冲 (目前非跨资产质押品)"
+        risk_note = "通过 Unit Protocol 封装映射，适合 1:1 现货全款持有对冲；需关注 Unit 协议流动性与脱锚风险。"
+        tags.append("🌉 Unit 映射")
+    elif token_name in ['LINK0', 'AAVE0', 'AVAX0', 'BNB1', 'BNB0', 'XMR1', 'CFX0']:
+        origin_type = "HYBRIDGE_BRIDGED"
+        origin_badge = "🌉 跨链桥接"
+        origin_desc = f"通过 HyBridge / Wagyu 跨链桥接至 Hyperliquid L1 的资产 ({perp_coin})"
+        collateral_status = "全款现货对冲 (桥接映射资产)"
+        risk_note = "存在跨链桥流动性与微小基差波动，建仓前需确认盘口滑点。"
+        tags.append("🌉 跨链桥接")
+    else:
+        origin_type = "HIP1_PERMISSIONLESS"
+        origin_badge = "⚡ HIP-1 无许可"
+        origin_desc = "Hyperliquid L1 社区 HIP-1 无许可发币标准 (拍卖/联合曲线)"
+        collateral_status = "全款现货对冲 (独立现货)"
+        risk_note = "社区无许可创建代币，需核对底层 Pair ID 谨防同名撞车；关注部署者分成与抛压。"
+        tags.append("⚡ HIP-1 发币")
+
+    if evm_address:
+        tags.append("⛓️ HyperEVM")
+
+    if multiplier > 1.0:
+        tags.append(f"🔢 {int(multiplier)}x 乘数")
+
+    return {
+        "origin_type": origin_type,
+        "origin_badge": origin_badge,
+        "origin_tags": tags,
+        "origin_desc": origin_desc,
+        "collateral_status": collateral_status,
+        "risk_note": risk_note,
+        "is_canonical": is_canonical_token or is_canonical_pair,
+        "has_evm": bool(evm_address),
+        "evm_address": evm_address,
+        "token_id": token_id,
+        "deployer_fee_share_pct": deployer_fee_share * 100.0,
+        "raw_pair_id": raw_pair_name
+    }
+
+
+def classify_bybit_token(symbol: str, spot_symbol: str, multiplier: float = 1.0) -> dict:
+    """
+    Classifies a Bybit token/contract by origin nature and multiplier.
+    """
+    tags = []
+    if multiplier > 1.0:
+        origin_type = "BYBIT_MULTIPLIER"
+        origin_badge = f"🔢 {int(multiplier)}x 乘数"
+        origin_desc = f"Bybit 正向永续合约 ({int(multiplier)}倍放大乘数)"
+        collateral_status = "统一交易账户 (UTA) 支持多币种质押"
+        risk_note = f"1张合约代表 {int(multiplier)} 个现货代币，下单计算须按 1:{int(multiplier)} 换算。"
+        tags.append(f"🔢 {int(multiplier)}x 乘数")
+    else:
+        origin_type = "BYBIT_OFFICIAL_LINEAR"
+        origin_badge = "🏛️ 官方正向"
+        origin_desc = "Bybit 官方主流正向 USDT/USDC 永续合约"
+        collateral_status = "统一交易账户 (UTA) 支持多币种质押"
+        risk_note = "主流正向合约，深度好、预言机公允；在 UTA 模式下注意维持保证金率。"
+        tags.append("🏛️ 官方正向")
+
+    return {
+        "origin_type": origin_type,
+        "origin_badge": origin_badge,
+        "origin_tags": tags,
+        "origin_desc": origin_desc,
+        "collateral_status": collateral_status,
+        "risk_note": risk_note,
+        "is_canonical": True,
+        "has_evm": False,
+        "evm_address": None,
+        "token_id": "",
+        "deployer_fee_share_pct": 0.0,
+        "raw_pair_id": spot_symbol
+    }
+
+
 class FundingRateCalculator:
     """Calculates APR, APY, fee payback times, and matches spot & perp markets."""
 
@@ -212,6 +324,7 @@ class FundingRateCalculator:
                 "raw_pair_name": raw_pair_name,
                 "base_symbol": base_symbol,
                 "quote_symbol": quote_symbol,
+                "base_token": base_token,
                 "mid_px": mid_px,
                 "mark_px": float(ctx.get("markPx", 0.0) or mid_px),
                 "day_ntl_vlm": day_ntl_vlm,
@@ -282,6 +395,13 @@ class FundingRateCalculator:
             entry_payback_hrs = self.calculate_payback_hours(self.entry_fee_rate, hourly_funding)
             roundtrip_payback_hrs = self.calculate_payback_hours(self.roundtrip_fee_rate, hourly_funding)
 
+            token_meta = classify_hyperliquid_token(
+                base_token=spot_info.get("base_token", {}),
+                spot_pair=spot_info,
+                perp_coin=matched_perp_coin,
+                multiplier=mult
+            )
+
             results.append({
                 "exchange": "Hyperliquid",
                 "coin": matched_perp_coin,
@@ -289,6 +409,18 @@ class FundingRateCalculator:
                 "spot_pair": spot_info["spot_pair_name"],
                 "raw_spot_pair": spot_info.get("raw_pair_name", spot_info["spot_pair_name"]),
                 "multiplier": mult,
+                "origin_type": token_meta["origin_type"],
+                "origin_badge": token_meta["origin_badge"],
+                "origin_tags": token_meta["origin_tags"],
+                "origin_desc": token_meta["origin_desc"],
+                "collateral_status": token_meta["collateral_status"],
+                "risk_note": token_meta["risk_note"],
+                "is_canonical": token_meta["is_canonical"],
+                "has_evm": token_meta["has_evm"],
+                "evm_address": token_meta["evm_address"],
+                "token_id": token_meta["token_id"],
+                "deployer_fee_share_pct": token_meta["deployer_fee_share_pct"],
+                "raw_pair_id": token_meta["raw_pair_id"],
                 "hourly_funding": hourly_funding,
                 "hourly_funding_pct": hourly_funding * 100.0,
                 "funding_interval_hr": 1.0,
@@ -406,11 +538,30 @@ class FundingRateCalculator:
             spot_vol = safe_float(spot_ticker.get("turnover24h"))
             open_interest = safe_float(perp.get("openInterestValue") or perp.get("openInterest"))
 
+            bybit_meta = classify_bybit_token(
+                symbol=perp_sym,
+                spot_symbol=matched_spot_sym,
+                multiplier=multiplier
+            )
+
             results.append({
                 "exchange": "Bybit",
                 "coin": perp_sym,
                 "spot_symbol": matched_spot_sym,
                 "spot_pair": matched_spot_sym,
+                "multiplier": multiplier,
+                "origin_type": bybit_meta["origin_type"],
+                "origin_badge": bybit_meta["origin_badge"],
+                "origin_tags": bybit_meta["origin_tags"],
+                "origin_desc": bybit_meta["origin_desc"],
+                "collateral_status": bybit_meta["collateral_status"],
+                "risk_note": bybit_meta["risk_note"],
+                "is_canonical": bybit_meta["is_canonical"],
+                "has_evm": bybit_meta["has_evm"],
+                "evm_address": bybit_meta["evm_address"],
+                "token_id": bybit_meta["token_id"],
+                "deployer_fee_share_pct": bybit_meta["deployer_fee_share_pct"],
+                "raw_pair_id": bybit_meta["raw_pair_id"],
                 "hourly_funding": hourly_funding,
                 "hourly_funding_pct": hourly_funding_pct,
                 "funding_interval_hr": interval_hr,

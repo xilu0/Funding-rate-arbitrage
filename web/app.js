@@ -13,6 +13,38 @@ function initEventListeners() {
     document.getElementById("btn-refresh").addEventListener("click", fetchData);
     document.getElementById("search-input").addEventListener("input", renderTable);
     
+    // Knowledge Base Modal
+    const guideBtn = document.getElementById("btn-knowledge-guide");
+    const guideModal = document.getElementById("knowledge-modal");
+    const guideCloseBtn = document.getElementById("knowledge-modal-close-btn");
+
+    if (guideBtn) guideBtn.addEventListener("click", openKnowledgeModal);
+    if (guideCloseBtn) guideCloseBtn.addEventListener("click", closeKnowledgeModal);
+    if (guideModal) {
+        guideModal.addEventListener("click", (e) => {
+            if (e.target === guideModal) closeKnowledgeModal();
+        });
+    }
+
+    // Guide Tab Switching
+    document.querySelectorAll(".guide-tab-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            document.querySelectorAll(".guide-tab-btn").forEach(b => b.classList.remove("active"));
+            document.querySelectorAll(".guide-tab-pane").forEach(p => p.classList.remove("active"));
+            
+            const targetTab = e.currentTarget.getAttribute("data-tab");
+            e.currentTarget.classList.add("active");
+            const pane = document.getElementById(targetTab);
+            if (pane) pane.classList.add("active");
+        });
+    });
+
+    const originSelect = document.getElementById("origin-type-select");
+    if (originSelect) {
+        originSelect.addEventListener("change", renderTable);
+        originSelect.addEventListener("input", renderTable);
+    }
+
     document.getElementById("exchange-select").addEventListener("change", (e) => {
         const ex = e.target.value;
         if (ex === "bybit") {
@@ -195,19 +227,87 @@ function updateSortHeaderUI() {
     });
 }
 
+function openKnowledgeModal() {
+    const modal = document.getElementById("knowledge-modal");
+    if (modal) modal.classList.remove("hidden");
+}
+
+function closeKnowledgeModal() {
+    const modal = document.getElementById("knowledge-modal");
+    if (modal) modal.classList.add("hidden");
+}
+
+function getFilterKeyForOrigin(originType, hasEvm, multiplier) {
+    if (originType === "OFFICIAL_CANONICAL" || originType === "NATIVE_HYPE") return "hl_official";
+    if (originType === "UNIT_BRIDGED") return "hl_unit";
+    if (originType === "HYBRIDGE_BRIDGED") return "hl_hybridge";
+    if (originType === "HIP1_PERMISSIONLESS") return "hl_hip1";
+    if (originType === "BYBIT_OFFICIAL_LINEAR") return "bybit_linear";
+    if (originType === "BYBIT_MULTIPLIER" || (multiplier && multiplier > 1.0)) return "multiplier";
+    if (hasEvm) return "evm";
+    return "all";
+}
+
+function filterByOrigin(originKey) {
+    const originSelect = document.getElementById("origin-type-select");
+    if (originSelect) {
+        originSelect.value = originKey;
+        renderTable();
+    }
+}
+
 function renderTable() {
     const tbody = document.getElementById("table-body");
     const searchQuery = document.getElementById("search-input").value.trim().toLowerCase();
     const paybackMode = document.getElementById("payback-mode").value;
+    const originSelectEl = document.getElementById("origin-type-select");
+    const originFilter = originSelectEl ? originSelectEl.value : "all";
 
     // Filter
     let filtered = rawData.filter(item => {
-        if (!searchQuery) return true;
-        return item.coin.toLowerCase().includes(searchQuery) || 
-               item.spot_symbol.toLowerCase().includes(searchQuery) ||
-               (item.exchange && item.exchange.toLowerCase().includes(searchQuery)) ||
-               item.spot_pair.toLowerCase().includes(searchQuery);
+        // Search filter
+        if (searchQuery) {
+            const matchesSearch = item.coin.toLowerCase().includes(searchQuery) || 
+                   item.spot_symbol.toLowerCase().includes(searchQuery) ||
+                   (item.exchange && item.exchange.toLowerCase().includes(searchQuery)) ||
+                   item.spot_pair.toLowerCase().includes(searchQuery) ||
+                   (item.raw_spot_pair && item.raw_spot_pair.toLowerCase().includes(searchQuery)) ||
+                   (item.raw_pair_id && item.raw_pair_id.toLowerCase().includes(searchQuery)) ||
+                   (item.origin_badge && item.origin_badge.toLowerCase().includes(searchQuery)) ||
+                   (item.origin_type && item.origin_type.toLowerCase().includes(searchQuery));
+            if (!matchesSearch) return false;
+        }
+
+        // Origin Type Filter
+        if (originFilter && originFilter !== "all") {
+            const otype = item.origin_type || "";
+            const hasEvm = !!item.has_evm;
+            const mult = parseFloat(item.multiplier) || 1.0;
+
+            if (originFilter === "hl_official" || originFilter === "official") {
+                if (otype !== "OFFICIAL_CANONICAL" && otype !== "NATIVE_HYPE") return false;
+            } else if (originFilter === "hl_unit" || originFilter === "unit") {
+                if (otype !== "UNIT_BRIDGED") return false;
+            } else if (originFilter === "hl_hybridge" || originFilter === "hybridge") {
+                if (otype !== "HYBRIDGE_BRIDGED") return false;
+            } else if (originFilter === "hl_hip1" || originFilter === "hip1") {
+                if (otype !== "HIP1_PERMISSIONLESS") return false;
+            } else if (originFilter === "bybit_linear") {
+                if (otype !== "BYBIT_OFFICIAL_LINEAR") return false;
+            } else if (originFilter === "all_official") {
+                if (otype !== "OFFICIAL_CANONICAL" && otype !== "NATIVE_HYPE" && otype !== "BYBIT_OFFICIAL_LINEAR") return false;
+            } else if (originFilter === "evm") {
+                if (!hasEvm) return false;
+            } else if (originFilter === "multiplier") {
+                if (mult <= 1.0 && otype !== "BYBIT_MULTIPLIER") return false;
+            }
+        }
+
+        return true;
     });
+
+    // Update the 4 stats overview cards for the active filtered view!
+    updateStatsOverview(filtered);
 
     // Sort
     const sortKey = (currentSortField === "payback_hrs") 
@@ -229,7 +329,7 @@ function renderTable() {
     });
 
     if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="12" class="loading-cell">未找到匹配的套利标的</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" class="loading-cell">未找到匹配的套利标的 (当前筛选无数据)</td></tr>`;
         return;
     }
 
@@ -258,18 +358,52 @@ function renderTable() {
         const exchClass = item.exchange === "Hyperliquid" ? "exchange-hl" : "exchange-bybit";
         const exchShort = item.exchange === "Hyperliquid" ? "HL" : "Bybit";
 
+        let badgeClass = "badge-canonical";
+        if (item.origin_type === "UNIT_BRIDGED") badgeClass = "badge-unit";
+        else if (item.origin_type === "HYBRIDGE_BRIDGED") badgeClass = "badge-bridged";
+        else if (item.origin_type === "HIP1_PERMISSIONLESS") badgeClass = "badge-hip1";
+        else if (item.origin_type === "BYBIT_MULTIPLIER" || (item.multiplier && item.multiplier > 1.0)) badgeClass = "badge-multiplier";
+
+        const originBadgeText = item.origin_badge || (item.exchange === "Hyperliquid" ? "🏛️ 官方" : "🏛️ 官方正向");
+        const evmTagHtml = item.has_evm ? `<span class="badge-evm-tag">EVM</span>` : "";
+        const clickFilterKey = getFilterKeyForOrigin(item.origin_type, item.has_evm, item.multiplier);
+
+        const originTooltipHtml = `
+            <div class="tooltip-wrapper">
+                <span class="badge-origin ${badgeClass}" onclick="filterByOrigin('${clickFilterKey}')" title="点击过滤此类型标的">${originBadgeText}${evmTagHtml}</span>
+                <div class="origin-tooltip">
+                    <div class="tooltip-title">
+                        <span>${originBadgeText}</span>
+                        <span>${item.exchange}</span>
+                    </div>
+                    <div class="tooltip-desc">${item.origin_desc || 'Hyperliquid / Bybit 撮合标的'}</div>
+                    <div class="tooltip-meta-row">
+                        <span class="tooltip-meta-label">底层交易对:</span>
+                        <span class="tooltip-meta-val">${item.raw_pair_id || item.raw_spot_pair || item.spot_pair}</span>
+                    </div>
+                    ${item.evm_address ? `<div class="tooltip-meta-row"><span class="tooltip-meta-label">EVM 合约:</span><span class="tooltip-meta-val">${item.evm_address.slice(0, 8)}...${item.evm_address.slice(-6)}</span></div>` : ''}
+                    <div class="tooltip-meta-row">
+                        <span class="tooltip-meta-label">质押属性:</span>
+                        <span class="tooltip-meta-val" style="color:${(item.origin_type === 'OFFICIAL_CANONICAL' || item.origin_type === 'NATIVE_HYPE') ? '#34d399' : '#94a3b8'};">${item.collateral_status || '全款现货对冲'}</span>
+                    </div>
+                    <div class="tooltip-risk">💡 ${item.risk_note || '注意核对现货与永续基差'}</div>
+                </div>
+            </div>
+        `;
+
         html += `
             <tr>
                 <td><span class="rank-badge">${index + 1}</span></td>
                 <td><span class="exchange-badge ${exchClass}">${exchShort}</span></td>
-                <td><div class="coin-cell"><span>${item.coin}</span></div></td>
-                <td><span style="color: var(--text-secondary);">${item.spot_symbol}</span> <span style="font-size:11px; opacity:0.6;">(${item.spot_pair})</span></td>
+                <td><div class="coin-cell"><span style="font-weight:700;">${item.coin}</span></div></td>
+                <td>${originTooltipHtml}</td>
+                <td><span style="color: var(--text-primary); font-weight:600;">${item.spot_symbol}</span> <span style="font-size:11px; opacity:0.75; font-family:var(--font-mono);">(${item.raw_spot_pair || item.spot_pair})</span></td>
                 <td><span class="badge-rate ${hrClass}">${hrSign}${hrRate.toFixed(4)}% /h</span></td>
                 <td style="font-weight:700; color: ${item.apr_pct > 0 ? '#10b981' : '#f8fafc'};">${aprStr}</td>
                 <td>${apyStr}</td>
                 <td>$${formatPrice(item.spot_price)}</td>
                 <td>$${formatPrice(item.perp_price)}</td>
-                <td style="color: ${item.spread_pct >= 0 ? '#06b6d4' : '#ef4444'};">${spreadStr}</td>
+                <td style="color: ${item.spread_pct >= 0 ? '#06b6d4' : '#ef4444'}; font-weight:600;">${spreadStr}</td>
                 <td><span class="${paybackClass}">${paybackStr}</span></td>
                 <td>$${Math.round(item.perp_24h_volume).toLocaleString()}</td>
                 <td>
@@ -315,25 +449,6 @@ function initDepthModalListeners() {
 }
 
 document.addEventListener("DOMContentLoaded", initDepthModalListeners);
-
-function openDepthModal(exchange, symbol, spotSymbol) {
-    currentDepthExchange = exchange;
-    currentDepthSymbol = symbol;
-    currentDepthSpotSymbol = spotSymbol || symbol;
-
-    const modal = document.getElementById("depth-modal");
-    document.getElementById("depth-modal-title").textContent = `⚖️ Delta 中性建仓容量评估 - ${symbol}`;
-    document.getElementById("depth-modal-subtitle").textContent = `${exchange} (Spot: ${currentDepthSpotSymbol} | Perp: ${symbol})`;
-
-    modal.classList.remove("hidden");
-    const customVal = parseFloat(document.getElementById("custom-capital-input").value) || 10000;
-    fetchAndRenderDepthCapacity(exchange, symbol, currentDepthSpotSymbol, customVal);
-}
-
-function closeDepthModal() {
-    const modal = document.getElementById("depth-modal");
-    if (modal) modal.classList.add("hidden");
-}
 
 async function fetchAndRenderDepthCapacity(exchange, symbol, spotSymbol, customUsd) {
     const tbody = document.getElementById("depth-table-body");
@@ -689,6 +804,28 @@ function initBuildModalListeners() {
 
 document.addEventListener("DOMContentLoaded", initBuildModalListeners);
 
+function openDepthModal(exchange, symbol, spotSymbol) {
+    currentDepthExchange = exchange;
+    currentDepthSymbol = symbol;
+    currentDepthSpotSymbol = spotSymbol || symbol;
+
+    const matchedItem = rawData.find(d => d.coin === symbol && d.exchange.toLowerCase().includes(exchange.toLowerCase()));
+    const originBadgeText = matchedItem ? ` [${matchedItem.origin_badge || ''}]` : "";
+
+    const modal = document.getElementById("depth-modal");
+    document.getElementById("depth-modal-title").textContent = `⚖️ Delta 中性建仓容量评估 - ${symbol}`;
+    document.getElementById("depth-modal-subtitle").textContent = `${exchange} (Spot: ${currentDepthSpotSymbol} | Perp: ${symbol})${originBadgeText}`;
+
+    modal.classList.remove("hidden");
+    const customVal = parseFloat(document.getElementById("custom-capital-input").value) || 10000;
+    fetchAndRenderDepthCapacity(exchange, symbol, currentDepthSpotSymbol, customVal);
+}
+
+function closeDepthModal() {
+    const modal = document.getElementById("depth-modal");
+    if (modal) modal.classList.add("hidden");
+}
+
 function openBuildModal(exchange, symbol, spotSymbol, rawSpotPair) {
     currentBuildExchange = exchange || "bybit";
     currentBuildSymbol = symbol;
@@ -696,9 +833,13 @@ function openBuildModal(exchange, symbol, spotSymbol, rawSpotPair) {
     currentBuildRawSpotPair = rawSpotPair || "";
 
     const exchName = currentBuildExchange.toLowerCase().includes("hyperliquid") ? "Hyperliquid" : "Bybit";
+    const matchedItem = rawData.find(d => d.coin === symbol && d.exchange.toLowerCase().includes(exchange.toLowerCase()));
+    const originBadgeText = matchedItem ? ` [${matchedItem.origin_badge || ''}]` : "";
+    const collateralText = (matchedItem && matchedItem.collateral_status) ? ` | 质押属性: ${matchedItem.collateral_status}` : "";
+
     const modal = document.getElementById("build-modal");
     document.getElementById("build-modal-title").textContent = `🚀 ${exchName} Delta 中性套利建仓演练与风控 - ${symbol}`;
-    document.getElementById("build-modal-subtitle").textContent = `Exchange: ${exchName} | Spot: ${currentBuildSpotSymbol} | Perp: ${symbol}`;
+    document.getElementById("build-modal-subtitle").textContent = `Exchange: ${exchName} | Spot: ${currentBuildSpotSymbol} | Perp: ${symbol}${originBadgeText}${collateralText}`;
 
     modal.classList.remove("hidden");
     fetchAndRenderBuildTryRun();

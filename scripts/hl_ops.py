@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, Tuple, List
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import src.env
 from src.version import __version__, __app_name__, format_version_text, get_diagnostics
 
 # Graceful Rich Fallback for Zero-Dependency Environments

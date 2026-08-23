@@ -3,7 +3,7 @@ import json
 import urllib.parse
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from typing import Dict, Any, List, Optional, Tuple, Callable
-
+import src.env
 from src.hyperliquid_client import HyperliquidClient
 from src.bybit_client import BybitClient
 from src.storage import FundingHistoryStorage

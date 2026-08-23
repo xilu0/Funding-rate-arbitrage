@@ -1,6 +1,7 @@
 import time
 import os
 from typing import Dict, Any, List, Tuple, Optional
+import src.env
 from src.hyperliquid_client import HyperliquidClient
 from src.calculator import FundingRateCalculator, safe_float
 
@@ -20,10 +21,10 @@ class HyperliquidExecutor:
                  is_mainnet: bool = True,
                  calculator: Optional[FundingRateCalculator] = None,
                  hl_client: Optional[HyperliquidClient] = None):
-        # Auto-load from gopass secret if specified
-        gopass_secret = gopass_secret or os.getenv("GOPASS_SECRET")
-        if gopass_secret:
-            gopass_data = self.load_gopass_credentials(gopass_secret)
+        # Optional legacy fallback for gopass_secret if provided
+        if gopass_secret or os.getenv("GOPASS_SECRET"):
+            secret_path = gopass_secret or os.getenv("GOPASS_SECRET")
+            gopass_data = self.load_gopass_credentials(secret_path) if secret_path else {}
             if not account_address and "HL_ACCOUNT_ADDRESS" in gopass_data:
                 account_address = gopass_data["HL_ACCOUNT_ADDRESS"]
             if not agent_private_key and "HL_AGENT_PRIVATE_KEY" in gopass_data:
@@ -46,7 +47,7 @@ class HyperliquidExecutor:
 
     @staticmethod
     def load_gopass_credentials(secret_path: str) -> Dict[str, str]:
-        """Loads Key-Value pairs from a multi-line gopass secret."""
+        """Legacy helper: Loads Key-Value pairs from gopass secret if gopass CLI is available."""
         import subprocess
         try:
             res = subprocess.run(["gopass", "show", "-n", secret_path], capture_output=True, text=True, check=True)

@@ -56,16 +56,14 @@
 
 ### 3.1 全局凭据配置与通用参数
 
-支持环境变量、Gopass 安全加载或 CLI 参数直接传入：
+支持原生 `gopass env` 动态注入、环境变量或 CLI 参数：
 
 ```bash
-# 方式 A：Gopass 自动加载 (推荐)
-python3 scripts/hl_ops.py <subcommand> --gopass trading/hyperliquid/mainnet
+# 方式 A：gopass env 原生目录注入 (最推荐，12-Factor 标准)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py <subcommand>
 
-# 方式 B：环境变量注入
-export HL_ACCOUNT_ADDRESS="0xYourMasterPublicAddress..."
-export HL_AGENT_PRIVATE_KEY="0xYourAgentWalletPrivateKey..."
-python3 scripts/hl_ops.py <subcommand>
+# 方式 B：环境变量子 Shell 注入
+HL_AGENT_PRIVATE_KEY=$(gopass show -o trading/hyperliquid/HL_AGENT_PRIVATE_KEY) python3 scripts/hl_ops.py <subcommand>
 
 # 方式 C：CLI 参数显式传入
 python3 scripts/hl_ops.py <subcommand> -a 0xMasterAddress... -k 0xAgentKey...
@@ -76,7 +74,6 @@ python3 scripts/hl_ops.py <subcommand> -a 0xMasterAddress... -k 0xAgentKey...
 | :--- | :--- | :--- |
 | `--account` | `-a` | Master 账户公开地址 (只读状态归属) |
 | `--agent-key` | `-k` | Agent Wallet 私钥 (签名授权) |
-| `--gopass` | `-g` | Gopass 凭据路径 (如 `trading/hyperliquid/mainnet`) |
 | `--testnet` | - | 连接至 Hyperliquid Testnet 测试网 |
 | `--json` | - | 输出原始 JSON 格式（便于脚本管道或程序解析） |
 | `--version` | `-v` | 输出系统版本及 Python/Gopass/依赖环境诊断信息 |
@@ -184,9 +181,9 @@ python3 scripts/hl_ops.py version
 在 `~/.zshrc` 或 `~/.bashrc` 中添加以下配置，可大幅提升日常运维效率：
 
 ```bash
-# Hyperliquid 运维快捷别名 (绑定 Gopass 凭据)
-alias hl-ops='python3 scripts/hl_ops.py --gopass trading/hyperliquid/mainnet'
-alias hl-mon='python3 monitor.py --gopass trading/hyperliquid/mainnet'
+# Hyperliquid 运维快捷别名 (使用原生 gopass env 注入)
+alias hl-ops='gopass env trading/hyperliquid python3 scripts/hl_ops.py'
+alias hl-mon='gopass env trading/hyperliquid python3 monitor.py'
 
 # 常用命令极速调用
 alias hl-check='hl-ops check'

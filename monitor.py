@@ -4,6 +4,7 @@ import time
 import argparse
 import json
 import re
+import src.env
 from typing import Optional, Tuple
 from src.version import __version__, format_version_text, get_diagnostics
 

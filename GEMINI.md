@@ -6,6 +6,7 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
 
 ## 1. Architecture Overview
 
+- **`src/env.py`**: Zero-dependency environment loader with strict Twelve-Factor priority (`os.environ` / `gopass env` > `.env` decoy fallback).
 - **`src/hyperliquid_client.py`**: Client for Hyperliquid info API (`metaAndAssetCtxs`, `spotMetaAndAssetCtxs`, `l2Book`, `clearinghouseState`, `spotClearinghouseState`, `openOrders`, `extraAgents`).
 - **`src/hyperliquid_executor.py`**: Agent Wallet (API Wallet) executor, zero-risk canary testing, Scheme D health & liquidation distance evaluation, deadman switch, USD transfer, and emergency deleveraging.
 - **`src/bybit_client.py`**: Client for Bybit V5 Public/Private REST API (`tickers`, `funding/history`, `orderbook`, `order/create`).

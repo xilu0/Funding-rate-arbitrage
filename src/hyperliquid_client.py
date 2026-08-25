@@ -155,3 +155,13 @@ class HyperliquidClient:
             return res
         return {}
 
+    def get_user_fees(self, user: str) -> Dict[str, Any]:
+        """
+        Fetches user fee schedule, daily volume tiers, and active referral/staking discounts.
+        Returns dict with 'userCrossRate', 'userAddRate', 'activeReferralDiscount', etc.
+        """
+        res = self._post({"type": "userFees", "user": user})
+        if isinstance(res, dict):
+            return res
+        return {}
+

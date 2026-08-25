@@ -75,11 +75,11 @@ python3 server.py --port 8000
   - Requires **Portfolio Margin** mode (Standard/Unified modes do not support cross-asset collateralization for perps).
   - **Eligibility Gate**: Requires Account Value $\ge \$10,000$ OR Total/Weighted Trading Volume $\ge \$5,000,000$ (and $<\$25\text{M}$ during Beta).
 - **Standard Capital Allocation (Scheme D)**:
-  - 90% Spot Token Allocation (pledged as collateral with 50% haircut / collateral ratio).
+  - 90% Spot Token Allocation (pledged as collateral with 65% LTV / collateral weight, i.e. 35% haircut).
   - 90% Perp Short Notional (Delta-neutral 1:1 hedge against spot holdings).
   - 10% Liquid USDC Cash Reserve (acts as liquidity shock absorber against borrow interest and sudden pumps).
   - Capital Efficiency: $90.0\%$ ($0.90 \times \text{Funding APR}$).
-  - Liquidation Threshold: $P_{\text{liq}} \ge +109.6\%$ (doubling without liquidation).
+  - Liquidation Threshold: $P_{\text{liq}} \ge +192.4\%$ ($2.924 \times P_0$, nearly tripling without liquidation).
 - **Entry Quality Guards**:
   - Filter: 7D Simple APR $\ge 20\%$ & Payback Hours $\le 48\text{h}$ & Basis Spread $\ge 0.0\%$ (strictly forbid entering at negative basis).
   - Minimum Horizon: $\ge 30$ days recommended to amortize roundtrip taker and slippage frictions.
@@ -93,7 +93,7 @@ python3 server.py --port 8000
 - **Standard Execution Paradigm**:
   - **Spot Leg**: Place Post-Only Maker limit orders (`Alo` on Hyperliquid / `PostOnly` on Bybit) at Best Bid to eliminate spot taker fees and slippage.
   - **Perp Leg**: Trigger millisecond IOC/Market taker orders upon spot fill to lock in 1:1 Delta neutrality without legging risk.
-  - **Fee Optimization**: Reduces entry fee frictions by **$50\% \sim 70\%$** (Hyperliquid from 0.105% to 0.050%, Bybit from 0.155% to 0.075%), cutting payback time in half.
+  - **Fee Optimization**: Reduces entry fee frictions by **$48\% \sim 70\%$** (Hyperliquid from 0.1104% to 0.0576% with 0.0432% Taker / 0.0144% Maker, Bybit from 0.155% to 0.075%), cutting payback time in half.
 - **Reference**: See [`docs/maker_taker_execution_architecture.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/maker_taker_execution_architecture.md) for full execution guidelines.
 
 

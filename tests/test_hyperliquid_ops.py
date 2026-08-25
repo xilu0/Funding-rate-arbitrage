@@ -61,6 +61,21 @@ class TestHyperliquidClientEndpoints(unittest.TestCase):
             "startTime": 1784650000000
         })
 
+    @patch.object(HyperliquidClient, '_post')
+    def test_get_user_fees(self, mock_post):
+        mock_post.return_value = {
+            "userCrossRate": "0.00045",
+            "userAddRate": "0.00015",
+            "activeReferralDiscount": "0.04"
+        }
+        res = self.client.get_user_fees("0x1234567890abcdef1234567890abcdef12345678")
+        self.assertEqual(res["userCrossRate"], "0.00045")
+        self.assertEqual(res["activeReferralDiscount"], "0.04")
+        mock_post.assert_called_once_with({
+            "type": "userFees",
+            "user": "0x1234567890abcdef1234567890abcdef12345678"
+        })
+
 
 class TestHyperliquidExecutor(unittest.TestCase):
     def setUp(self):
@@ -133,7 +148,7 @@ class TestHyperliquidExecutor(unittest.TestCase):
         self.mock_client.get_clearinghouse_state.return_value = {
             "marginSummary": {
                 "accountValue": "10000.0",
-                "totalMarginUsed": "4500.0", # > 60% of effective margin
+                "totalMarginUsed": "5000.0", # > 60% of effective margin (5000 / 7850 = 63.7%)
                 "totalNtlPos": "9000.0",
                 "totalRawUsd": "1000.0"
             },
@@ -233,9 +248,9 @@ class TestHyperliquidExecutor(unittest.TestCase):
         self.assertFalse(plan["perp_order"]["is_buy"])
 
         # Fee savings
-        self.assertAlmostEqual(plan["fee_summary"]["base_fee_pct"], 0.050)
-        self.assertAlmostEqual(plan["fee_summary"]["fee_savings_pct"], 0.055)
-        self.assertAlmostEqual(plan["fee_summary"]["fee_savings_usd"], 5.50)
+        self.assertAlmostEqual(plan["fee_summary"]["base_fee_pct"], 0.0576)
+        self.assertAlmostEqual(plan["fee_summary"]["fee_savings_pct"], 0.0528)
+        self.assertAlmostEqual(plan["fee_summary"]["fee_savings_usd"], 5.28)
 
 
 if __name__ == "__main__":

@@ -40,7 +40,7 @@ class HyperliquidExecutor:
 
         self.base_url = base_url
         self.is_mainnet = is_mainnet
-        self.calc = calculator or FundingRateCalculator(spot_taker_fee=0.0007, perp_taker_fee=0.00035)
+        self.calc = calculator or FundingRateCalculator()
         self.client = hl_client or HyperliquidClient(api_url=f"{base_url}/info")
         self._sdk_available = False
         self._init_sdk()
@@ -273,9 +273,9 @@ class HyperliquidExecutor:
     def evaluate_scheme_d_health(self) -> Dict[str, Any]:
         """
         Evaluates Master Account's Scheme D (Collateral + Perp Hedge) Health:
-        - 50% Haircut on Spot Collateral.
+        - 65% LTV (35% Haircut) on Spot Collateral.
         - 10% Cash Reserve / Buffer.
-        - Distance to Liquidation P_liq (approx +109.6%).
+        - Distance to Liquidation P_liq (approx +192.4%).
         - Tier 1/2/3 Risk Alert triggers.
         """
         if not self.account_address:
@@ -284,11 +284,12 @@ class HyperliquidExecutor:
         clearinghouse = self.client.get_clearinghouse_state(self.account_address)
         spot_state = self.client.get_spot_clearinghouse_state(self.account_address)
 
-        margin_summary = clearinghouse.get("marginSummary", {})
+        # Parse Margin & Balances
+        margin_summary = clearinghouse.get("crossMarginSummary") or clearinghouse.get("marginSummary", {})
         account_value = safe_float(margin_summary.get("accountValue", 0.0))
         total_margin_used = safe_float(margin_summary.get("totalMarginUsed", 0.0))
         total_ntl_pos = safe_float(margin_summary.get("totalNtlPos", 0.0))
-        total_raw_usd = safe_float(margin_summary.get("totalRawUsd", 0.0))
+        total_raw_usd = safe_float(margin_summary.get("totalRawUsd", 0.0)) or account_value
         withdrawable = safe_float(clearinghouse.get("withdrawable", 0.0))
 
         # Perp Positions
@@ -297,30 +298,33 @@ class HyperliquidExecutor:
         total_upnl = 0.0
 
         for ap in clearinghouse.get("assetPositions", []):
-            pos = ap.get("position", {})
-            coin = pos.get("coin", "")
-            szi = safe_float(pos.get("szi", 0.0))
-            if szi != 0.0:
-                entry_px = safe_float(pos.get("entryPx", 0.0))
-                upnl = safe_float(pos.get("unrealizedPnl", 0.0))
-                liq_px = safe_float(pos.get("liquidationPx", 0.0))
-                margin_used = safe_float(pos.get("marginUsed", 0.0))
-                cum_funding = safe_float(pos.get("cumFunding", {}).get("allTime", 0.0))
-                cum_funding_total += cum_funding
-                total_upnl += upnl
+            pos_data = ap.get("position", {})
+            if pos_data:
+                coin = pos_data.get("coin", "")
+                szi = safe_float(pos_data.get("szi", 0.0))
+                if szi != 0.0 or pos_data.get("entryPx"):
+                    entry_px = safe_float(pos_data.get("entryPx", 0.0))
+                    liq_px = safe_float(pos_data.get("liquidationPx", 0.0))
+                    upnl = safe_float(pos_data.get("unrealizedPnl", 0.0))
+                    cum_funding = safe_float(pos_data.get("cumFunding", {}).get("allTime", 0.0))
+                    margin_used = safe_float(pos_data.get("marginUsed", 0.0))
 
-                positions.append({
-                    "coin": coin,
-                    "size": szi,
-                    "side": "Short" if szi < 0 else "Long",
-                    "entry_price": entry_px,
-                    "unrealized_pnl": upnl,
-                    "liquidation_price": liq_px,
-                    "margin_used": margin_used,
-                    "cum_funding": cum_funding
-                })
+                    total_upnl += upnl
+                    cum_funding_total += cum_funding
 
-        # Spot Balances & Collateral Valuation (50% Haircut)
+                    positions.append({
+                        "coin": coin,
+                        "size": szi,
+                        "side": "Short" if szi < 0 else "Long",
+                        "entry_price": entry_px,
+                        "liquidation_price": liq_px,
+                        "unrealized_pnl": upnl,
+                        "margin_used": margin_used,
+                        "upnl": upnl,
+                        "cum_funding": cum_funding
+                    })
+
+        # Spot Balances & Collateral Valuation (65% LTV / 35% Haircut)
         spot_balances = []
         total_spot_valuation = 0.0
         total_collateral_value = 0.0
@@ -337,7 +341,7 @@ class HyperliquidExecutor:
             elif total_qty > 0:
                 # Estimate token value
                 valuation = entry_ntl if entry_ntl > 0 else total_qty
-                haircut_val = valuation * 0.50
+                haircut_val = valuation * 0.65
                 total_spot_valuation += valuation
                 total_collateral_value += haircut_val
 
@@ -346,7 +350,7 @@ class HyperliquidExecutor:
                     "total_qty": total_qty,
                     "hold_qty": hold_qty,
                     "valuation_usd": valuation,
-                    "collateral_value_usd": haircut_val # 50% haircut
+                    "collateral_value_usd": haircut_val # 65% LTV
                 })
 
         # Effective Margin & Utilization
@@ -354,7 +358,7 @@ class HyperliquidExecutor:
         margin_utilization_pct = (total_margin_used / effective_margin * 100.0) if effective_margin > 0 else 0.0
 
         # Liquidation Distance for Scheme D
-        # Scheme D P_liq = P_0 / 0.477 approx +109.6%
+        # Scheme D P_liq = P_0 / 0.342 approx +192.4%
         # Distance to liq = (P_liq - P_current) / P_current
         min_liq_distance_pct = 999.0
         for pos in positions:
@@ -364,7 +368,7 @@ class HyperliquidExecutor:
                     min_liq_distance_pct = dist
 
         if min_liq_distance_pct == 999.0:
-            min_liq_distance_pct = 109.6 # Standard theoretical Scheme D default
+            min_liq_distance_pct = 192.4 # Standard theoretical Scheme D default
 
         # Determine Tier
         if min_liq_distance_pct < 8.0:
@@ -545,7 +549,7 @@ class HyperliquidExecutor:
             perp_fee_rate = self.calc.perp_taker_fee
             spot_order_type = {"limit": {"tif": "Alo"}} # Post-Only Maker
             perp_order_type = {"limit": {"tif": "Ioc"}} # Taker IOC on trigger
-            workflow_desc = "【Hyperliquid Maker-Taker 架构】先在现货端挂 Alo (Post-Only) 买单，等待对手方吃单；成交后毫秒级在合约端以 IOC/Market 市价开出等量空头对冲，节省 0.055% 现货吃单手续费。"
+            workflow_desc = "【Hyperliquid Maker-Taker 架构】先在现货端挂 Alo (Post-Only) 买单，等待对手方吃单；成交后毫秒级在合约端以 IOC/Market 市价开出等量空头对冲，节省 0.0528% 现货吃单手续费。"
         elif execution_mode == "maker_maker":
             spot_fee_rate = self.calc.spot_maker_fee
             perp_fee_rate = self.calc.perp_maker_fee

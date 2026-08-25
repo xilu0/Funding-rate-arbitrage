@@ -2,7 +2,7 @@
 name: hyperliquid-collateral-arbitrage
 description: >-
   Hyperliquid 现货质押与合约对冲资金费率套利（方案 D）实操指南与量化风控规范。
-  涵盖 50% 折价质押、10% USDC 现金缓冲、强平线量化推导、三级阶梯调仓与防频繁摩擦滞后回补策略。
+  涵盖 65% LTV 质押折算率 (35% 折价)、10% USDC 现金缓冲、强平线量化推导 (+192.4%)、三级阶梯调仓与防频繁摩擦滞后回补策略。
 ---
 
 # Hyperliquid Collateral Arbitrage (Scheme D)
@@ -15,7 +15,7 @@ description: >-
 
 ### 1.1 资金分配与杠杆定义
 - **总初始本金**：$C$ (USDC)
-- **现货买入与质押**：投入 $0.90 \cdot C$ 买入现货 $Q = \frac{0.90 \cdot C}{P_0}$，全额转入质押抵押物（折价率 $\alpha = 0.50$）。
+- **现货买入与质押**：投入 $0.90 \cdot C$ 买入现货 $Q = \frac{0.90 \cdot C}{P_0}$，全额转入质押抵押物（质押折算率 $\alpha = 0.65$ / LTV 65%，即 35% 折价）。
 - **合约做空对冲**：以 $P_0$ 开出名义价值 $N = 0.90 \cdot C$ 的永续空头（Delta 绝对中性）。
 - **闲置现金储备**：保留 $0.10 \cdot C$ 为流动性 USDC 缓冲池。
 - **资金利用率 (Capital Efficiency)**：
@@ -23,16 +23,16 @@ description: >-
 
 ### 1.2 强平价格推导 ($P_{\text{liq}}$)
 当价格上涨至 $P$ 时：
-1. **现货抵押物估值（打 5 折）**：$V_{\text{collateral}}(P) = 0.50 \cdot Q \cdot P = 0.45 \cdot C \cdot \frac{P}{P_0}$
+1. **现货抵押物估值（LTV 65% 折算）**：$V_{\text{collateral}}(P) = 0.65 \cdot Q \cdot P = 0.585 \cdot C \cdot \frac{P}{P_0}$
 2. **合约空头未实现盈亏**：$\text{UPnL}_{\text{perp}}(P) = Q \cdot (P_0 - P) = 0.90 \cdot C - 0.90 \cdot C \cdot \frac{P}{P_0}$
 3. **账户总有效保证金**：
-   $$M(P) = 0.10 \cdot C + V_{\text{collateral}}(P) + \text{UPnL}_{\text{perp}}(P) = C \cdot \left(1.00 - 0.45 \cdot \frac{P}{P_0}\right)$$
+   $$M(P) = 0.10 \cdot C + V_{\text{collateral}}(P) + \text{UPnL}_{\text{perp}}(P) = C \cdot \left(1.00 - 0.315 \cdot \frac{P}{P_0}\right)$$
 4. **维持保证金需求（按 $\text{MMR} = 3\%$ 计算）**：
    $$\text{Req}(P) = \text{MMR} \times N(P) = 0.03 \times 0.90 \cdot C \cdot \frac{P}{P_0} = 0.027 \cdot C \cdot \frac{P}{P_0}$$
 
 强平触发条件 $M(P) \le \text{Req}(P)$：
-$$1.00 - 0.45 \cdot \frac{P}{P_0} \le 0.027 \cdot \frac{P}{P_0}$$
-$$0.477 \cdot \frac{P}{P_0} \ge 1.00 \implies P_{\text{liq}} = \frac{P_0}{0.477} \approx \mathbf{2.096 \cdot P_0} \quad (\mathbf{+109.6\%})$$
+$$1.00 - 0.315 \cdot \frac{P}{P_0} \le 0.027 \cdot \frac{P}{P_0}$$
+$$0.342 \cdot \frac{P}{P_0} \ge 1.00 \implies P_{\text{liq}} = \frac{P_0}{0.342} \approx \mathbf{2.924 \cdot P_0} \quad (\mathbf{+192.4\%})$$
 
 ---
 

@@ -329,7 +329,7 @@ class TestFundingRateCalculator(unittest.TestCase):
         self.assertTrue(c_purr["is_canonical"])
         self.assertTrue(c_purr["has_evm"])
         self.assertIn("官方 Canonical", c_purr["origin_badge"])
-        self.assertIn("50% 折算率", c_purr["collateral_status"])
+        self.assertIn("65% LTV", c_purr["collateral_status"])
 
         # 2. Native HYPE
         hype_token = {"name": "HYPE", "isCanonical": False, "tokenId": "0x0d01", "evmContract": {"address": "0x0d0167"}}

@@ -186,12 +186,12 @@ def render_status_report(health_data: Dict[str, Any]) -> Tuple[Any, Any, Any]:
         )
         panel = Panel(summary_text, title="[bold magenta]📊 Hyperliquid 现货质押与对冲套利状态大盘 (Scheme D)[/bold magenta]")
 
-        spot_table = Table(title="🪙 现货资产与质押估值 (Spot Balances & 50% Haircut Collateral)", show_lines=True, header_style="bold green")
+        spot_table = Table(title="🪙 现货资产与质押估值 (Spot Balances & 65% LTV Collateral)", show_lines=True, header_style="bold green")
         spot_table.add_column("币种 (Coin)", style="bold yellow")
         spot_table.add_column("持有数量 (Total Qty)", justify="right")
         spot_table.add_column("冻结中 (Hold)", justify="right")
         spot_table.add_column("资产估值 (USD Value)", justify="right")
-        spot_table.add_column("折价质押金 (Collateral 50%)", justify="right", style="bold cyan")
+        spot_table.add_column("质押保证金 (65% LTV)", justify="right", style="bold cyan")
 
         spot_balances = health_data.get("spot_balances", [])
         if not spot_balances:
@@ -251,7 +251,7 @@ def render_status_report(health_data: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     box = format_box("📊 Hyperliquid 现货质押与对冲套利状态大盘 (Scheme D)", box_lines, min_width=88)
 
     # Spot Table
-    headers_spot = ["币种 (Coin)", "持有数量 (Total Qty)", "冻结中 (Hold)", "资产估值 (USD Value)", "折价质押金 (Collateral 50%)"]
+    headers_spot = ["币种 (Coin)", "持有数量 (Total Qty)", "冻结中 (Hold)", "资产估值 (USD Value)", "质押保证金 (65% LTV)"]
     rows_spot = []
     spot_balances = health_data.get("spot_balances", [])
     if not spot_balances:
@@ -259,7 +259,7 @@ def render_status_report(health_data: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     else:
         for s in spot_balances:
             rows_spot.append([s["coin"], f"{s['total_qty']:,.4f}", f"{s['hold_qty']:,.4f}", f"${s['valuation_usd']:,.2f}", f"${s['collateral_value_usd']:,.2f}"])
-    spot_tbl = format_ascii_table("🪙 现货资产与质押估值 (Spot Balances & 50% Haircut Collateral)", headers_spot, rows_spot, ["left", "right", "right", "right", "right"])
+    spot_tbl = format_ascii_table("🪙 现货资产与质押估值 (Spot Balances & 65% LTV Collateral)", headers_spot, rows_spot, ["left", "right", "right", "right", "right"])
 
     # Perp Table
     headers_perp = ["合约标的 (Coin)", "方向 (Side)", "持仓张数 (Size)", "开仓均价 (Entry Px)", "强平参考价 (Liq Px)", "未实现盈亏 (UPnL)", "累计资金费收益"]

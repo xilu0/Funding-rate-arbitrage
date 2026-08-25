@@ -1,10 +1,10 @@
 import math
 from typing import Dict, List, Any, Optional, Tuple
 
-DEFAULT_HL_SPOT_TAKER_FEE = 0.0007   # 0.07%
-DEFAULT_HL_PERP_TAKER_FEE = 0.00035  # 0.035%
-DEFAULT_HL_SPOT_MAKER_FEE = 0.00015  # 0.015%
-DEFAULT_HL_PERP_MAKER_FEE = 0.00015  # 0.015%
+DEFAULT_HL_SPOT_TAKER_FEE = 0.000672  # 0.0672% (0.070% base with 4% referral discount)
+DEFAULT_HL_PERP_TAKER_FEE = 0.000432  # 0.0432% (0.045% base with 4% referral discount)
+DEFAULT_HL_SPOT_MAKER_FEE = 0.000144  # 0.0144% (0.015% base with 4% referral discount)
+DEFAULT_HL_PERP_MAKER_FEE = 0.000144  # 0.0144% (0.015% base with 4% referral discount)
 
 DEFAULT_BYBIT_SPOT_TAKER_FEE = 0.0010  # 0.10%
 DEFAULT_BYBIT_PERP_TAKER_FEE = 0.00055 # 0.055%
@@ -101,14 +101,14 @@ def classify_hyperliquid_token(base_token: dict, spot_pair: dict, perp_coin: str
         origin_type = "OFFICIAL_CANONICAL"
         origin_badge = "🏛️ 官方 Canonical"
         origin_desc = "Hyperliquid 官方创世/原生资产，官方维护撮合与定价"
-        collateral_status = "支持质押 (50% 折算率，方案 D 核心标的)"
-        risk_note = "预言机最稳健，流动性充裕；在 Portfolio Margin 账户中享有 50% 质押折算率。"
+        collateral_status = "支持质押 (65% LTV / 折算率，方案 D 核心标的)"
+        risk_note = "预言机最稳健，流动性充裕；在 Portfolio Margin 账户中享有 65% 质押折算率。"
         tags.append("🏛️ 官方 Canonical")
     elif token_name == "HYPE":
         origin_type = "NATIVE_HYPE"
         origin_badge = "🏛️ 原生 HYPE"
         origin_desc = "Hyperliquid L1 原生核心生态资产"
-        collateral_status = "支持质押 (50% 折算率，方案 D 核心标的)"
+        collateral_status = "支持质押 (65% LTV / 折算率，方案 D 核心标的)"
         risk_note = "Hyperliquid L1 核心代币，深度极佳；方案 D 现货质押核心标的。"
         tags.append("🏛️ 原生 HYPE")
     elif token_name.startswith("U") and token_name in COMMON_PREFIX_ALIASES:

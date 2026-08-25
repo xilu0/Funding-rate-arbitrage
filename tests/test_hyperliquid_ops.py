@@ -252,7 +252,45 @@ class TestHyperliquidExecutor(unittest.TestCase):
         self.assertAlmostEqual(plan["fee_summary"]["fee_savings_pct"], 0.0528)
         self.assertAlmostEqual(plan["fee_summary"]["fee_savings_usd"], 5.28)
 
+    def test_resolve_spot_market_pair_hype(self):
+        self.mock_client.get_spot_market_data.return_value = (
+            [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150, "szDecimals": 2}],
+            [{"tokens": [150, 0], "name": "@107", "index": 107}],
+            [{"midPx": "80.0", "markPx": "80.0", "coin": "@107"}]
+        )
+        spot_res = self.executor.resolve_spot_market_pair("HYPE")
+        self.assertIsNotNone(spot_res)
+        self.assertEqual(spot_res["raw_pair_name"], "@107")
+        self.assertEqual(spot_res["display_name"], "HYPE/USDC")
+        self.assertEqual(spot_res["base_symbol"], "HYPE")
+        self.assertEqual(spot_res["quote_symbol"], "USDC")
+
+    def test_build_arbitrage_plan_hype(self):
+        self.mock_client.get_perp_market_data.return_value = (
+            [{"name": "HYPE", "szDecimals": 2}],
+            [{"funding": "0.0001", "midPx": "80.0", "markPx": "80.0"}]
+        )
+        self.mock_client.get_spot_market_data.return_value = (
+            [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150, "szDecimals": 2}],
+            [{"tokens": [150, 0], "name": "@107", "index": 107}],
+            [{"midPx": "80.0", "markPx": "80.0", "coin": "@107"}]
+        )
+        self.mock_client.get_l2_book.side_effect = lambda c: {
+            "levels": [[{"px": "80.0", "sz": "100.0"}], [{"px": "80.1", "sz": "100.0"}]]
+        }
+
+        plan = self.executor.build_arbitrage_plan(coin="HYPE", amount_qty=1.0, execution_mode="maker_taker")
+        self.assertEqual(plan["coin"], "HYPE")
+        self.assertEqual(plan["spot_pair"], "@107")
+        self.assertEqual(plan["spot_qty"], 1.0)
+        self.assertEqual(plan["perp_qty"], 1.0)
+        self.assertEqual(plan["scheme_d"]["capital_efficiency_pct"], 90.0)
+        self.assertAlmostEqual(plan["scheme_d"]["collateral_ltv_pct"], 65.0)
+        self.assertGreater(plan["scheme_d"]["total_capital_required_usd"], 80.0)
+        self.assertAlmostEqual(plan["scheme_d"]["theoretical_liq_price"], 80.0 / 0.342, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

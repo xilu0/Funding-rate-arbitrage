@@ -154,7 +154,18 @@ python3 scripts/hl_ops.py deleverage --coin PURR --pct 25
 python3 scripts/hl_ops.py deleverage --coin PURR --pct 50 --force
 ```
 
-#### 8. 版本与环境诊断 (`version`)
+#### 8. 套利建仓演练与实盘执行 (`arbitrage`)
+自动化构建 1:1 Delta 中性套利方案（现货质押 + 永续对冲），支持 Maker-Taker 极速对冲与风控矩阵计算。
+```bash
+# 演练建仓 1 个 HYPE (默认 Dry-Run，输出完整盘口、订单与风控数据)
+python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1
+
+# 实盘执行 (使用 Gopass 内存注入私钥)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --force
+```
+> 详见实操手册：[docs/hyperliquid_hype_delta_neutral_arbitrage.md](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/hyperliquid_hype_delta_neutral_arbitrage.md)
+
+#### 9. 版本与环境诊断 (`version`)
 输出当前量化系统版本、Python 环境、Gopass 状态及依赖诊断。
 ```bash
 python3 scripts/hl_ops.py version

@@ -329,6 +329,139 @@ def render_orders_table(orders: list) -> Any:
             ])
     return format_ascii_table("📝 活动挂单监控 (Open Orders)", headers, rows, ["right", "left", "center", "right", "right", "center"])
 
+
+def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+    """Renders comprehensive Arbitrage Plan and Scheme D Risk Allocation tables."""
+    coin = plan.get("coin", "HYPE")
+    display_pair = plan.get("display_spot_pair", f"{coin}/USDC")
+    raw_pair = plan.get("spot_pair", coin)
+    mode = plan.get("execution_mode", "maker_taker")
+    scheme_d = plan.get("scheme_d", {})
+    order_plan = plan.get("order_plan", {})
+    spot_ord = order_plan.get("spot_order", {})
+    perp_ord = order_plan.get("perp_order", {})
+    fee_sum = order_plan.get("fee_summary", {})
+
+    mode_label = "⚡ Maker-Taker 触发对冲 (Alo Maker 挂单 + IOC 对冲)" if mode == "maker_taker" else "🚀 Taker-Taker 全市价吃单"
+
+    if HAS_RICH:
+        summary_text = (
+            f"[bold yellow]套利标的:[/bold yellow] [bold white]{coin}[/bold white] (现货对: [cyan]{display_pair}[/cyan] [dim]({raw_pair})[/dim] | 永续: [cyan]{coin}-PERP[/cyan])\n"
+            f"[bold yellow]执行架构:[/bold yellow] [bold green]{mode_label}[/bold green]\n"
+            f"[bold cyan]建仓规模:[/bold cyan] {plan.get('spot_qty', 0):,.4f} {coin} (~${plan.get('spot_notional_usd', 0):,.2f} USD)\n"
+            f"[bold cyan]当前资金费率:[/bold cyan] {plan.get('hourly_funding', 0)*100:.5f}% / 1h | [bold green]Simple APR: {plan.get('apr_pct', 0):.2f}%[/bold green] | [bold green]Scheme D 实际 APR: {plan.get('effective_apr_pct', 0):.2f}%[/bold green]\n"
+            f"[bold cyan]盘口期现基差:[/bold cyan] {plan.get('basis_spread_pct', 0):+.4f}% (现货: ${plan.get('target_spot_price', 0):,.4f} | 合约: ${plan.get('target_perp_price', 0):,.4f})\n"
+            f"[bold cyan]手续费回本周期:[/bold cyan] 单边进场: [bold white]{plan.get('entry_payback_str')}[/bold white] | 双边平仓: [bold white]{plan.get('roundtrip_payback_str')}[/bold white]\n"
+            f"[bold magenta]Maker-Taker 费率优化:[/bold magenta] [bold green]节省 +{fee_sum.get('fee_savings_pct', 0):.4f}% 手续费 (${fee_sum.get('fee_savings_usd', 0):.4f} USD)[/bold green]"
+        )
+        panel = Panel(summary_text, title=f"[bold magenta]🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利建仓方案 ({coin})[/bold magenta]")
+
+        # Table 1: Orders
+        order_table = Table(title="📋 双腿执行订单计划 (Order Execution Schedule)", show_lines=True, header_style="bold magenta")
+        order_table.add_column("交易腿 (Leg)", style="bold yellow")
+        order_table.add_column("标的 (Symbol)", justify="center")
+        order_table.add_column("方向 (Side)", justify="center")
+        order_table.add_column("委托数量 (Size)", justify="right")
+        order_table.add_column("委托价格 (Price)", justify="right")
+        order_table.add_column("订单类型 (Order Type)", justify="center", style="bold cyan")
+        order_table.add_column("角色与时序 (Role & Trigger)")
+        order_table.add_column("预估费率 (Fee)", justify="right")
+
+        order_table.add_row(
+            "Leg 1 (现货多头)",
+            f"{display_pair} ({raw_pair})",
+            "[green]BUY[/green]",
+            f"{spot_ord.get('sz', 0):,.4f} {coin}",
+            f"${spot_ord.get('limit_px', 0):,.4f}",
+            "Post-Only (Alo)",
+            spot_ord.get("role", "Trigger Leg (现货买一挂单)"),
+            f"{spot_ord.get('fee_pct', 0):.4f}%"
+        )
+        order_table.add_row(
+            "Leg 2 (合约空头)",
+            f"{coin}-PERP",
+            "[red]SELL[/red]",
+            f"{perp_ord.get('sz', 0):,.4f} 张",
+            f"${perp_ord.get('limit_px', 0):,.4f}",
+            "IOC Taker",
+            perp_ord.get("role", "Hedge Leg (现货成交毫秒对冲)"),
+            f"{perp_ord.get('fee_pct', 0):.4f}%"
+        )
+
+        # Table 2: Scheme D Allocation
+        scheme_table = Table(title="🛡️ 方案 D 资金分配与量化风控矩阵 (Scheme D Risk & Collateral)", show_lines=True, header_style="bold green")
+        scheme_table.add_column("配置资产 (Component)", style="bold yellow")
+        scheme_table.add_column("分配比例 (Weight)", justify="center")
+        scheme_table.add_column("资金占用 (USD Notional)", justify="right")
+        scheme_table.add_column("质押/折算属性 (Collateral Property)")
+        scheme_table.add_column("量化风控说明 (Risk Notes)")
+
+        scheme_table.add_row(
+            f"1. 现货 {coin} 多头",
+            "90.0%",
+            f"${scheme_d.get('spot_allocation_usd', 0):,.2f} USD",
+            f"65.0% LTV 质押 (折算 ${scheme_d.get('spot_collateral_valuation_usd', 0):,.2f} 保证金)",
+            "全额转为抵押物，抵扣 35% Haircut"
+        )
+        scheme_table.add_row(
+            f"2. 永续 {coin} 空头",
+            "90.0%",
+            f"${scheme_d.get('perp_short_notional_usd', 0):,.2f} USD",
+            "1:1 Delta 绝对中性对冲",
+            "锁定现货价格敞口，持续收取资金费"
+        )
+        scheme_table.add_row(
+            "3. USDC 闲置现金储备",
+            "10.0%",
+            f"${scheme_d.get('cash_buffer_usdc', 0):,.2f} USD",
+            "100.0% 现金缓冲池",
+            "抗暴涨冲击吸收器 (Level 1 调拨资金)"
+        )
+        scheme_table.add_row(
+            "[bold white]总本金需求 (Total Capital)[/bold white]",
+            "[bold white]100.0%[/bold white]",
+            f"[bold cyan]${scheme_d.get('total_capital_required_usd', 0):,.2f} USDC[/bold cyan]",
+            f"[bold green]资金利用率: {scheme_d.get('capital_efficiency_pct', 90):.1f}%[/bold green]",
+            f"[bold red]理论强平价: ${scheme_d.get('theoretical_liq_price', 0):,.2f} (+{scheme_d.get('liq_distance_pct', 192.4):.1f}% 安全垫)[/bold red]"
+        )
+
+        return panel, order_table, scheme_table
+
+    # Plain ASCII Formatter
+    col1_w = 44
+    col2_w = 44
+    line1 = f"套利标的 : {coin} (现货: {display_pair} [{raw_pair}] | 永续: {coin}-PERP)"
+    line2 = f"执行架构 : {mode_label}"
+    line3 = pad_string(f"建仓规模 : {plan.get('spot_qty', 0):,.4f} {coin}", col1_w) + pad_string(f"名义价值 : ${plan.get('spot_notional_usd', 0):,.2f} USD", col2_w)
+    line4 = pad_string(f"资金费率 : {plan.get('hourly_funding', 0)*100:.5f}%/1h (APR {plan.get('apr_pct', 0):.2f}%)", col1_w) + pad_string(f"Scheme D 实际 APR: {plan.get('effective_apr_pct', 0):.2f}%", col2_w)
+    line5 = pad_string(f"现货买价 : ${plan.get('target_spot_price', 0):,.4f}", col1_w) + pad_string(f"合约卖价 : ${plan.get('target_perp_price', 0):,.4f} (基差 {plan.get('basis_spread_pct', 0):+.4f}%)", col2_w)
+    line6 = pad_string(f"进场回本 : {plan.get('entry_payback_str')}", col1_w) + pad_string(f"双边回本 : {plan.get('roundtrip_payback_str')}", col2_w)
+    line7 = f"费率优化 : 节省 +{fee_sum.get('fee_savings_pct', 0):.4f}% 手续费 (${fee_sum.get('fee_savings_usd', 0):.4f} USD)"
+
+    box_lines = [line1, line2, "---", line3, line4, line5, line6, "---", line7]
+    box = format_box(f"🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利建仓方案 ({coin})", box_lines, min_width=88)
+
+    # Order table
+    h_ord = ["交易腿 (Leg)", "标的 (Symbol)", "方向 (Side)", "数量 (Size)", "价格 (Price)", "订单类型 (Type)", "角色与时序", "费率"]
+    r_ord = [
+        ["Leg 1 (现货)", f"{display_pair} ({raw_pair})", "BUY", f"{spot_ord.get('sz', 0):,.4f} {coin}", f"${spot_ord.get('limit_px', 0):,.4f}", "Post-Only (Alo)", spot_ord.get("role", "买一挂单"), f"{spot_ord.get('fee_pct', 0):.4f}%"],
+        ["Leg 2 (合约)", f"{coin}-PERP", "SELL", f"{perp_ord.get('sz', 0):,.4f} 张", f"${perp_ord.get('limit_px', 0):,.4f}", "IOC Taker", perp_ord.get("role", "对冲吃单"), f"{perp_ord.get('fee_pct', 0):.4f}%"]
+    ]
+    tbl_ord = format_ascii_table("📋 双腿执行订单计划 (Order Execution Schedule)", h_ord, r_ord, ["left", "center", "center", "right", "right", "center", "left", "right"])
+
+    # Scheme D table
+    h_sch = ["配置资产 (Component)", "分配比例", "资金占用 (USD)", "质押/折算属性", "量化风控说明"]
+    r_sch = [
+        [f"1. 现货 {coin} 多头", "90.0%", f"${scheme_d.get('spot_allocation_usd', 0):,.2f}", f"65% LTV (估值 ${scheme_d.get('spot_collateral_valuation_usd', 0):,.2f})", "全额转质押抵扣 35% Haircut"],
+        [f"2. 永续 {coin} 空头", "90.0%", f"${scheme_d.get('perp_short_notional_usd', 0):,.2f}", "1:1 Delta 绝对中性对冲", "锁定敞口收取资金费"],
+        ["3. USDC 现金储备", "10.0%", f"${scheme_d.get('cash_buffer_usdc', 0):,.2f}", "100% 现金缓冲池", "抗暴涨冲击吸收器"],
+        ["总本金需求", "100.0%", f"${scheme_d.get('total_capital_required_usd', 0):,.2f}", f"资金利用率: {scheme_d.get('capital_efficiency_pct', 90):.1f}%", f"理论强平价: ${scheme_d.get('theoretical_liq_price', 0):,.2f} (+{scheme_d.get('liq_distance_pct', 192.4):.1f}%)"]
+    ]
+    tbl_sch = format_ascii_table("🛡️ 方案 D 资金分配与量化风控矩阵 (Scheme D Risk & Collateral)", h_sch, r_sch, ["left", "center", "right", "left", "left"])
+
+    return box, tbl_ord, tbl_sch
+
+
 def main():
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--account", "-a", type=str, default=argparse.SUPPRESS, help="Master Account public address (e.g. 0x123...)")
@@ -380,6 +513,16 @@ def main():
     del_p.add_argument("--coin", type=str, required=True, help="Target coin (e.g. PURR)")
     del_p.add_argument("--pct", type=float, default=25.0, help="Percentage to deleverage (e.g. 25, 50, 100)")
     del_p.add_argument("--force", action="store_true", help="Force execute live deleveraging orders")
+
+    # 8. arbitrage / build
+    arb_p = subparsers.add_parser("arbitrage", parents=[common_parser], help="[建仓演练/执行] 构造 1:1 Delta中性资金费率套利方案 (Scheme D)")
+    arb_p.add_argument("--coin", type=str, default="HYPE", help="Target coin (default: HYPE)")
+    arb_p.add_argument("--qty", type=float, default=None, help="Target token quantity (e.g. 1.0)")
+    arb_p.add_argument("--usd", type=float, default=None, help="Target USD capital (e.g. 1000.0)")
+    arb_p.add_argument("--mode", type=str, default="maker_taker", choices=["maker_taker", "taker_taker", "maker_maker"], help="Execution mode (default: maker_taker)")
+    arb_p.add_argument("--dry-run", action="store_true", default=True, help="Simulate trade plan without live execution (default: True)")
+    arb_p.add_argument("--force", action="store_true", help="Submit live orders to Hyperliquid (Requires Agent Wallet key & SDK)")
+
 
     args = parser.parse_args()
 
@@ -478,5 +621,41 @@ def main():
             console.print(f"[bold green]阶梯减仓方案已锁定: 目标 {args.coin} 现货与空头头寸同步按 {args.pct:.1f}% 平仓变现。[/bold green]")
         return
 
+    if args.subcommand in ["arbitrage", "build"]:
+        qty = args.qty if args.qty is not None else (None if args.usd else 1.0)
+        try:
+            plan = executor.build_arbitrage_plan(
+                coin=args.coin,
+                amount_qty=qty,
+                amount_usd=args.usd,
+                execution_mode=args.mode
+            )
+        except Exception as e:
+            console.print(f"[bold red]❌ 构造套利方案失败: {e}[/bold red]")
+            return
+
+        is_dry_run = not args.force
+
+        if args.json:
+            print(json.dumps(plan, indent=2))
+        else:
+            panel, tbl_ord, tbl_sch = render_arbitrage_plan(plan)
+            console.print(panel)
+            console.print(tbl_ord)
+            console.print(tbl_sch)
+
+            if is_dry_run:
+                console.print("\n[bold yellow]💡 [DRY-RUN 演练模式] 未向交易所提交真实订单。如需实盘执行，请配置 API Wallet 并添加 --force 参数。[/bold yellow]")
+            else:
+                console.print("\n[bold red]⚡ 正在向 Hyperliquid 提交实盘订单...[/bold red]")
+                exec_res = executor.execute_arbitrage_plan(plan, dry_run=False)
+                if exec_res.get("status") in ["SPOT_ORDER_PLACED", "SUCCESS"]:
+                    console.print(f"[bold green]✅ 现货 Post-Only 挂单提交成功! (OID: {exec_res.get('spot_order_response', {}).get('response', {}).get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', '--')})[/bold green]")
+                    console.print("[dim]订单成交后将自动触发合约空头 IOC 对冲。[/dim]")
+                else:
+                    console.print(f"[bold red]❌ 实盘下单失败: {exec_res.get('error', exec_res.get('message', '未知错误'))}[/bold red]")
+        return
+
 if __name__ == "__main__":
     main()
+

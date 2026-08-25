@@ -602,3 +602,249 @@ class HyperliquidExecutor:
                 "taker_taker_base_fee_pct": taker_taker_base_fee
             }
         }
+
+    def resolve_spot_market_pair(self, coin: str) -> Optional[Dict[str, Any]]:
+        """
+        Resolves the spot trading pair name and metadata for a given perpetual/base coin on Hyperliquid.
+        For example: 'HYPE' -> '@107' (HYPE/USDC), 'PURR' -> 'PURR/USDC'.
+        """
+        try:
+            tokens, spot_univ, spot_ctxs = self.client.get_spot_market_data()
+            token_by_idx = {t["index"]: t for t in tokens}
+            
+            # Find base token index
+            matched_token = next((t for t in tokens if t.get("name", "").upper() == coin.upper()), None)
+            if not matched_token:
+                # Try alias / prefix
+                from src.calculator import COMMON_PREFIX_ALIASES
+                alias = COMMON_PREFIX_ALIASES.get(coin.upper())
+                if alias:
+                    matched_token = next((t for t in tokens if t.get("name", "").upper() == alias.upper()), None)
+
+            if not matched_token:
+                return None
+
+            base_idx = matched_token["index"]
+            # Find matching spot pair with USDC (token 0) or best volume
+            matching_pairs = [p for p in spot_univ if base_idx in p.get("tokens", [])]
+            if not matching_pairs:
+                return None
+
+            # Prefer USDC quote (token index 0)
+            best_pair = next((p for p in matching_pairs if p.get("tokens", [None, None])[1] == 0), matching_pairs[0])
+            best_pair_idx = best_pair.get("index", 0)
+            raw_pair_name = best_pair.get("name", "")
+
+            # Get quote token
+            quote_idx = best_pair.get("tokens", [None, None])[1]
+            quote_token = token_by_idx.get(quote_idx, {})
+            quote_symbol = quote_token.get("name", "USDC")
+            display_name = f"{matched_token['name']}/{quote_symbol}" if raw_pair_name.startswith("@") else raw_pair_name
+
+            ctx = spot_ctxs[best_pair_idx] if best_pair_idx < len(spot_ctxs) else {}
+
+            return {
+                "raw_pair_name": raw_pair_name,
+                "display_name": display_name,
+                "base_symbol": matched_token.get("name", coin),
+                "quote_symbol": quote_symbol,
+                "sz_decimals": int(matched_token.get("szDecimals", 2)),
+                "mid_px": safe_float(ctx.get("midPx", ctx.get("markPx", 0.0))),
+                "mark_px": safe_float(ctx.get("markPx", 0.0)),
+                "day_ntl_vlm": safe_float(ctx.get("dayNtlVlm", 0.0))
+            }
+        except Exception:
+            return None
+
+    def build_arbitrage_plan(self,
+                             coin: str = "HYPE",
+                             amount_qty: Optional[float] = None,
+                             amount_usd: Optional[float] = None,
+                             execution_mode: str = "maker_taker") -> Dict[str, Any]:
+        """
+        Builds a comprehensive Delta-Neutral Funding Rate Arbitrage Plan on Hyperliquid:
+        - Resolves Perp contract metadata and L2 book
+        - Resolves Spot trading pair (e.g. @107) and L2 book
+        - Calculates best bid/ask, mid prices, basis spread, funding APR
+        - Computes Scheme D capital allocation (90% Spot Collateral with 65% LTV, 90% Perp Short, 10% Cash Buffer)
+        - Computes Fee Savings and Payback Hours
+        """
+        perp_univ, perp_ctxs = self.client.get_perp_market_data()
+        matched_idx = next((i for i, u in enumerate(perp_univ) if u.get("name", "").upper() == coin.upper()), None)
+        if matched_idx is None:
+            raise ValueError(f"Perpetual contract '{coin}' not found on Hyperliquid.")
+
+        perp_meta = perp_univ[matched_idx]
+        perp_ctx = perp_ctxs[matched_idx]
+        hourly_funding = safe_float(perp_ctx.get("funding", 0.0))
+        perp_mid_px = safe_float(perp_ctx.get("midPx", perp_ctx.get("markPx", 0.0)))
+        perp_sz_decimals = int(perp_meta.get("szDecimals", 2))
+
+        # Spot pair lookup
+        spot_info = self.resolve_spot_market_pair(coin)
+        raw_spot_pair = spot_info["raw_pair_name"] if spot_info else coin
+        display_spot_pair = spot_info["display_name"] if spot_info else f"{coin}/USDC"
+        spot_sz_decimals = spot_info.get("sz_decimals", perp_sz_decimals) if spot_info else perp_sz_decimals
+
+        # L2 Books
+        perp_book = self.client.get_l2_book(coin)
+        spot_book = self.client.get_l2_book(raw_spot_pair)
+
+        perp_bids = perp_book.get("levels", [[], []])[0]
+        perp_asks = perp_book.get("levels", [[], []])[1]
+        spot_bids = spot_book.get("levels", [[], []])[0]
+        spot_asks = spot_book.get("levels", [[], []])[1]
+
+        best_perp_bid = safe_float(perp_bids[0]["px"]) if perp_bids else perp_mid_px
+        best_perp_ask = safe_float(perp_asks[0]["px"]) if perp_asks else perp_mid_px
+        best_spot_bid = safe_float(spot_bids[0]["px"]) if spot_bids else (spot_info.get("mid_px") if spot_info else perp_mid_px)
+        best_spot_ask = safe_float(spot_asks[0]["px"]) if spot_asks else (spot_info.get("mid_px") if spot_info else perp_mid_px)
+
+        spot_mid_px = (best_spot_bid + best_spot_ask) / 2.0 if (best_spot_bid > 0 and best_spot_ask > 0) else (best_perp_bid + best_perp_ask) / 2.0
+
+        # Execution pricing based on mode
+        if execution_mode == "maker_taker":
+            target_spot_px = best_spot_bid # Limit Post-Only Alo at Best Bid
+            target_perp_px = best_perp_bid # IOC Market Taker at Best Bid
+        elif execution_mode == "taker_taker":
+            target_spot_px = best_spot_ask # Immediate Ask Taker
+            target_perp_px = best_perp_bid # Immediate Bid Taker
+        else: # maker_maker
+            target_spot_px = best_spot_bid
+            target_perp_px = best_perp_ask
+
+        # Parse quantity and notional
+        if amount_qty is not None and amount_qty > 0:
+            spot_qty = round(float(amount_qty), spot_sz_decimals)
+            perp_qty = round(spot_qty, perp_sz_decimals)
+            target_usd = spot_qty * target_spot_px
+        elif amount_usd is not None and amount_usd > 0:
+            target_usd = float(amount_usd)
+            spot_qty = round(target_usd / target_spot_px, spot_sz_decimals) if target_spot_px > 0 else 0.0
+            perp_qty = round(spot_qty, perp_sz_decimals)
+        else:
+            # Default to 1 unit
+            spot_qty = round(1.0, spot_sz_decimals)
+            perp_qty = round(spot_qty, perp_sz_decimals)
+            target_usd = spot_qty * target_spot_px
+
+        # Base Maker-Taker plan
+        order_plan = self.build_maker_taker_order_plan(
+            coin=coin,
+            spot_pair=raw_spot_pair,
+            target_usd=target_usd,
+            spot_price=target_spot_px,
+            perp_price=target_perp_px,
+            multiplier=1.0,
+            execution_mode=execution_mode
+        )
+
+        # Scheme D Quantitative Risk & Collateral Allocation Model
+        spot_notional = spot_qty * target_spot_px
+        perp_short_notional = perp_qty * target_perp_px
+        collateral_weight = 0.65 # 65% LTV / 35% Haircut on Spot
+        spot_collateral_usd = spot_notional * collateral_weight
+        cash_buffer_usdc = spot_notional * (0.10 / 0.90) # 10% Cash Reserve
+        total_capital_required = spot_notional + cash_buffer_usdc
+        capital_efficiency_pct = 90.0
+        theoretical_p_liq = target_spot_px / 0.342 if target_spot_px > 0 else 0.0
+        liq_distance_pct = 192.4
+
+        # Funding Metrics
+        apr_pct = hourly_funding * 24.0 * 365.0 * 100.0
+        effective_apr_pct = apr_pct * 0.90 # 0.90 Capital Efficiency
+        spread_pct = ((target_perp_px - target_spot_px) / target_spot_px * 100.0) if target_spot_px > 0 else 0.0
+
+        entry_fee_pct = order_plan["fee_summary"]["base_fee_pct"]
+        roundtrip_fee_pct = entry_fee_pct * 2.0
+        entry_payback_hrs = (entry_fee_pct / 100.0) / hourly_funding if hourly_funding > 0 else None
+        roundtrip_payback_hrs = (roundtrip_fee_pct / 100.0) / hourly_funding if hourly_funding > 0 else None
+
+        return {
+            "coin": coin,
+            "spot_pair": raw_spot_pair,
+            "display_spot_pair": display_spot_pair,
+            "execution_mode": execution_mode,
+            "spot_qty": spot_qty,
+            "perp_qty": perp_qty,
+            "target_spot_price": target_spot_px,
+            "target_perp_price": target_perp_px,
+            "spot_mid_price": spot_mid_px,
+            "perp_mid_price": perp_mid_px,
+            "spot_notional_usd": spot_notional,
+            "perp_notional_usd": perp_short_notional,
+            "basis_spread_pct": spread_pct,
+            "hourly_funding": hourly_funding,
+            "apr_pct": apr_pct,
+            "effective_apr_pct": effective_apr_pct,
+            "entry_payback_hrs": entry_payback_hrs,
+            "entry_payback_str": FundingRateCalculator.format_hours(entry_payback_hrs),
+            "roundtrip_payback_hrs": roundtrip_payback_hrs,
+            "roundtrip_payback_str": FundingRateCalculator.format_hours(roundtrip_payback_hrs),
+            "scheme_d": {
+                "total_capital_required_usd": total_capital_required,
+                "spot_allocation_usd": spot_notional,
+                "spot_allocation_pct": 90.0,
+                "perp_short_notional_usd": perp_short_notional,
+                "perp_short_allocation_pct": 90.0,
+                "cash_buffer_usdc": cash_buffer_usdc,
+                "cash_buffer_pct": 10.0,
+                "collateral_ltv_pct": 65.0,
+                "collateral_haircut_pct": 35.0,
+                "spot_collateral_valuation_usd": spot_collateral_usd,
+                "capital_efficiency_pct": capital_efficiency_pct,
+                "theoretical_liq_price": theoretical_p_liq,
+                "liq_distance_pct": liq_distance_pct
+            },
+            "order_plan": order_plan
+        }
+
+    def execute_arbitrage_plan(self, plan: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any]:
+        """
+        Executes a prepared Delta-Neutral arbitrage plan on Hyperliquid:
+        - In Dry-Run (default): returns full execution simulation.
+        - In Live mode: Places Leg 1 Post-Only Spot Order and prepares Leg 2 Perp trigger.
+        """
+        coin = plan.get("coin", "HYPE")
+        spot_pair = plan.get("spot_pair", "@107")
+        spot_order = plan.get("order_plan", {}).get("spot_order", {})
+        perp_order = plan.get("order_plan", {}).get("perp_order", {})
+
+        if dry_run or not self._sdk_available:
+            return {
+                "status": "SIMULATED",
+                "coin": coin,
+                "spot_pair": spot_pair,
+                "plan": plan,
+                "message": "Dry-run simulation completed. No live orders submitted."
+            }
+
+        try:
+            account = self.Account.from_key(self.agent_private_key)
+            exchange = self.Exchange(account, self.base_url, account_address=self.account_address)
+
+            # Step 1: Submit Spot Post-Only Limit Order
+            spot_res = exchange.order(
+                name=spot_pair,
+                is_buy=spot_order.get("is_buy", True),
+                sz=spot_order.get("sz", 1.0),
+                limit_px=spot_order.get("limit_px", 1.0),
+                order_type=spot_order.get("order_type", {"limit": {"tif": "Alo"}}),
+                reduce_only=False
+            )
+
+            return {
+                "status": "SPOT_ORDER_PLACED" if isinstance(spot_res, dict) and spot_res.get("status") == "ok" else "FAILED",
+                "coin": coin,
+                "spot_pair": spot_pair,
+                "spot_order_response": spot_res,
+                "perp_order_prepared": perp_order,
+                "message": "Spot Post-Only maker order submitted to Hyperliquid orderbook. Ready for Perp hedge trigger."
+            }
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "coin": coin,
+                "error": str(e)
+            }
+

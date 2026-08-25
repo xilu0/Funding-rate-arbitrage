@@ -208,11 +208,11 @@ class FundingRateCalculator:
         self.enable_aliases = enable_aliases
         self.max_spread_pct = max_spread_pct
 
-    def get_entry_fee_rate(self, mode: str = "maker_taker") -> float:
+    def get_entry_fee_rate(self, mode: str = "taker_taker") -> float:
         """
         Single-side entry fee rate based on execution mode:
-        - 'maker_taker': Spot Maker + Perp Taker (Recommended standard SOP)
-        - 'taker_taker': Spot Taker + Perp Taker (Fast market execution benchmark)
+        - 'taker_taker': Spot Taker + Perp Taker (Zero adverse selection, deterministic delta - Recommended SOP)
+        - 'maker_taker': Spot Maker + Perp Taker (Trigger on fill)
         - 'maker_maker': Spot Maker + Perp Maker (Dual post-only)
         """
         if mode == "maker_taker":
@@ -221,7 +221,7 @@ class FundingRateCalculator:
             return self.spot_maker_fee + self.perp_maker_fee
         return self.spot_taker_fee + self.perp_taker_fee
 
-    def get_roundtrip_fee_rate(self, mode: str = "maker_taker") -> float:
+    def get_roundtrip_fee_rate(self, mode: str = "taker_taker") -> float:
         """Full round-trip fee rate based on execution mode (Entry + Exit)."""
         return self.get_entry_fee_rate(mode) * 2.0
 
@@ -771,10 +771,10 @@ class FundingRateCalculator:
                                   perp_mid_px: float,
                                   hourly_funding: float,
                                   custom_target_usd: Optional[float] = None,
-                                  execution_mode: str = "maker_taker") -> Dict[str, Any]:
+                                  execution_mode: str = "taker_taker") -> Dict[str, Any]:
         """
         Evaluates capital capacity and orderbook slippage for Delta-neutral arbitrage.
-        Supports execution_mode: 'maker_taker' (Spot Maker + Perp Taker) or 'taker_taker' (Dual Taker).
+        Supports execution_mode: 'taker_taker' (Dual Taker - Recommended SOP) or 'maker_taker' (Spot Maker + Perp Taker).
         """
         is_positive_arbitrage = (hourly_funding >= 0)
         abs_hourly_funding = abs(hourly_funding)

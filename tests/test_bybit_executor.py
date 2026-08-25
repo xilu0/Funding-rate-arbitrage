@@ -139,5 +139,23 @@ class TestBybitArbitrageExecutor(unittest.TestCase):
         self.assertEqual(plan_tt["orders_plan"][1]["order_type"], "Market (Taker)")
         self.assertAlmostEqual(plan_tt["fee_savings_pct"], 0.0)
 
+        # 3. Default (omitted execution_mode) should be taker_taker
+        plan_default = self.executor.generate_try_run_plan(
+            symbol="BTCUSDT",
+            spot_symbol="BTCUSDT",
+            multiplier=1.0,
+            target_usd=10000.0,
+            spot_qty=0.166666,
+            perp_contracts_qty=0.166666,
+            hourly_funding=0.0001,
+            spot_asks=spot_asks,
+            spot_bids=spot_bids,
+            spot_mid_px=59995.0,
+            perp_asks=perp_asks,
+            perp_bids=perp_bids,
+            perp_mid_px=60005.0
+        )
+        self.assertEqual(plan_default["execution_mode"], "taker_taker")
+
 if __name__ == "__main__":
     unittest.main()

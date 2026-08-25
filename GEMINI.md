@@ -89,11 +89,15 @@ python3 server.py --port 8000
   - **Level 3 (Emergency Breaker)**: Distance to liquidation $< 8\%$ $\to$ emergency market unwind $\ge 50\%$ positions.
   - **Cool-down Period**: 12 hours cool-down before re-leveraging after deleveraging to prevent high-frequency churn.
 
-### 3.5 Maker-Taker Trigger Hedge Architecture
-- **Standard Execution Paradigm**:
-  - **Spot Leg**: Place Post-Only Maker limit orders (`Alo` on Hyperliquid / `PostOnly` on Bybit) at Best Bid to eliminate spot taker fees and slippage.
-  - **Perp Leg**: Trigger millisecond IOC/Market taker orders upon spot fill to lock in 1:1 Delta neutrality without legging risk.
-  - **Fee Optimization**: Reduces entry fee frictions by **$48\% \sim 70\%$** (Hyperliquid from 0.1104% to 0.0576% with 0.0432% Taker / 0.0144% Maker, Bybit from 0.155% to 0.075%), cutting payback time in half.
-- **Reference**: See [`docs/maker_taker_execution_architecture.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/maker_taker_execution_architecture.md) for full execution guidelines.
+### 3.5 Execution Paradigm (Default: Taker-Taker Dual IOC)
+- **Standard Execution Paradigm (Default: Taker-Taker)**:
+  - **Zero Adverse Selection / No Option Exposure**: Dual IOC / Market taker orders executed simultaneously on Spot Ask and Perp Bid after L2 depth pre-check.
+  - **Deterministic Delta Neutrality**: Eliminates legging latency and toxic pick-off risk during rapid market drops.
+  - **Slippage & Risk Guard**: Combined slippage pre-calculated and enforced $\le 0.50\%$.
+- **Alternative Paradigm (Maker-Taker Trigger Hedge)**:
+  - **Spot Leg**: Place Post-Only Maker limit orders (`Alo` on Hyperliquid / `PostOnly` on Bybit) at Best Bid.
+  - **Perp Leg**: Trigger millisecond IOC/Market taker orders upon spot fill.
+  - **Trade-off**: Lower fee friction but exposed to limit order adverse selection / toxic flow in high-volatility regimes.
+- **Reference**: See [`docs/maker_taker_execution_architecture.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/maker_taker_execution_architecture.md) and [`docs/hyperliquid_hype_delta_neutral_arbitrage.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/hyperliquid_hype_delta_neutral_arbitrage.md).
 
 

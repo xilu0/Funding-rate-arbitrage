@@ -138,12 +138,12 @@ class BybitArbitrageExecutor:
                               max_slippage_pct: Optional[float] = None,
                               max_payback_hours: Optional[float] = None,
                               force: bool = False,
-                              execution_mode: str = "maker_taker") -> Dict[str, Any]:
+                              execution_mode: str = "taker_taker") -> Dict[str, Any]:
         """
         Generates structured Try-Run simulation plan & risk report.
         Supports execution_mode:
-        - 'maker_taker': Spot Maker (Post-Only) + Perp Taker (Trigger on Fill) - Recommended SOP
-        - 'taker_taker': Dual Market Taker (Fast entry benchmark)
+        - 'taker_taker': Dual Market Taker (Zero adverse selection, deterministic delta) - Recommended SOP
+        - 'maker_taker': Spot Maker (Post-Only) + Perp Taker (Trigger on Fill)
         """
         is_positive = (hourly_funding >= 0)
         spot_is_buy = is_positive

@@ -535,7 +535,7 @@ class HyperliquidExecutor:
                                      spot_price: float,
                                      perp_price: float,
                                      multiplier: float = 1.0,
-                                     execution_mode: str = "maker_taker") -> Dict[str, Any]:
+                                     execution_mode: str = "taker_taker") -> Dict[str, Any]:
         """
         Builds a structured Maker-Taker order plan for Hyperliquid:
         - Leg 1 (Spot): Post-Only Limit Order ('Alo' / Add Liquidity Only) at best bid.
@@ -660,7 +660,7 @@ class HyperliquidExecutor:
                              coin: str = "HYPE",
                              amount_qty: Optional[float] = None,
                              amount_usd: Optional[float] = None,
-                             execution_mode: str = "maker_taker") -> Dict[str, Any]:
+                             execution_mode: str = "taker_taker") -> Dict[str, Any]:
         """
         Builds a comprehensive Delta-Neutral Funding Rate Arbitrage Plan on Hyperliquid:
         - Resolves Perp contract metadata and L2 book

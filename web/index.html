@@ -362,11 +362,11 @@
                 <div class="capital-simulator-box">
                     <div class="execution-mode-picker">
                         <span class="range-label">执行架构策略:</span>
-                        <label class="radio-label" title="现货买一挂单 (Post-Only Maker)，成交后毫秒级触发合约 IOC 开空，省下昂贵现货吃单费">
-                            <input type="radio" name="execution-mode" value="maker_taker" checked> ⚡ <b>Maker-Taker</b> (推荐: 现货挂单 + 合约毫秒对冲)
+                        <label class="radio-label" title="现货与合约双边市价快速吃单 (IOC)，0 单腿敞口，0 逆向选择期权风险，确定性极高">
+                            <input type="radio" name="execution-mode" value="taker_taker" checked> 🚀 <b>Taker-Taker</b> (推荐: 双边快速吃单 / 0 逆向选择)
                         </label>
-                        <label class="radio-label" title="现货与合约双边市价吃单 (Taker)，秒级锁定但承担双边 Taker 手续费与冲击滑点">
-                            <input type="radio" name="execution-mode" value="taker_taker"> 🚀 <b>Taker-Taker</b> (双边快速市价)
+                        <label class="radio-label" title="现货买一挂单 (Post-Only Maker)，成交后毫秒级触发合约 IOC 开空，省现货吃单费">
+                            <input type="radio" name="execution-mode" value="maker_taker"> ⚡ <b>Maker-Taker</b> (挂单触发对冲)
                         </label>
                     </div>
 

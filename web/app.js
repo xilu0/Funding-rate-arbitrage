@@ -858,7 +858,7 @@ async function fetchAndRenderBuildTryRun() {
 
     const isUsd = document.querySelector("input[name='sizing-mode']:checked").value === "usd";
     const execModeRadio = document.querySelector("input[name='execution-mode']:checked");
-    const execMode = execModeRadio ? execModeRadio.value : "maker_taker";
+    const execMode = execModeRadio ? execModeRadio.value : "taker_taker";
     const amountVal = parseFloat(document.getElementById("build-amount-input").value) || 10000;
     const force = document.getElementById("chk-force-override").checked;
 

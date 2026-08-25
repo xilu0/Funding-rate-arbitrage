@@ -256,6 +256,10 @@ class TestFundingRateCalculator(unittest.TestCase):
             spot_maker_fee=0.00015,
             perp_maker_fee=0.00015
         )
+        # Default mode is taker_taker
+        self.assertAlmostEqual(calc.get_entry_fee_rate(), 0.00105)
+        self.assertAlmostEqual(calc.get_roundtrip_fee_rate(), 0.00210)
+
         # Maker-Taker: Spot Maker (0.015%) + Perp Taker (0.035%) = 0.050% = 0.00050
         self.assertAlmostEqual(calc.get_entry_fee_rate("maker_taker"), 0.00050)
         self.assertAlmostEqual(calc.get_roundtrip_fee_rate("maker_taker"), 0.00100)

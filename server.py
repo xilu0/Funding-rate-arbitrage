@@ -67,9 +67,9 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
         force = params.get("force", ["false"])[0].lower() == "true"
         max_slippage_str = params.get("max_slippage", ["0.50"])[0].strip()
         max_payback_str = params.get("max_payback", ["72.0"])[0].strip()
-        execution_mode = params.get("execution_mode", ["maker_taker"])[0].lower()
-        if execution_mode not in ["maker_taker", "taker_taker", "maker_maker"]:
-            execution_mode = "maker_taker"
+        execution_mode = params.get("execution_mode", ["taker_taker"])[0].lower()
+        if execution_mode not in ["taker_taker", "maker_taker", "maker_maker"]:
+            execution_mode = "taker_taker"
 
         try:
             amount_usd = float(amount_usd_str) if amount_usd_str else None
@@ -333,9 +333,9 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             except ValueError:
                 pass
 
-        execution_mode = params.get("execution_mode", ["maker_taker"])[0].lower()
-        if execution_mode not in ["maker_taker", "taker_taker", "maker_maker"]:
-            execution_mode = "maker_taker"
+        execution_mode = params.get("execution_mode", ["taker_taker"])[0].lower()
+        if execution_mode not in ["taker_taker", "maker_taker", "maker_maker"]:
+            execution_mode = "taker_taker"
 
         default_spot_fee = 0.10 if exchange == "bybit" else 0.07
         default_perp_fee = 0.055 if exchange == "bybit" else 0.035

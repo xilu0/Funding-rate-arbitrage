@@ -8,28 +8,28 @@
 
 ### 1.1 CLI 运维命令行 (`scripts/hl_ops.py`)
 
-系统内置了自动化套利计划构建与执行工具，支持演练（Dry-Run）与实盘（Live）模式：
+系统内置了自动化套利计划构建与执行工具，支持演练（Dry-Run）与实盘（Live）模式，**默认采用 `taker_taker`（双边快速市价/IOC 吃单，0 逆向选择风险）**：
 
 ```bash
-# 1. 演练构建 1 个 HYPE 建仓计划 (默认 Dry-Run，输出完整盘口、订单与风控数据)
+# 1. 演练构建 1 个 HYPE 建仓计划 (默认 Dry-Run 与 Taker-Taker 模式)
 python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1
 
-# 2. 显式指定采用 Maker-Taker 触发对冲模式 (默认标准推荐)
-python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --mode maker_taker
+# 2. 实盘提交建仓 (使用 Gopass 内存注入 API Wallet 私钥，并发双边吃单锁定 Delta)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --force
 
 # 3. 输出原始 JSON 数据 (供程序或自动化脚本调用)
 python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --json
 
-# 4. 实盘提交建仓 (使用 Gopass 内存注入 API Wallet 私钥)
-gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --force
+# 4. 可选：显式切换为 Maker-Taker 挂单模式 (低波动时期节省手续费)
+python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --mode maker_taker
 ```
 
 ### 1.2 Web REST API 接口 (Curl)
 
-本地后台服务启动后（`python3 server.py --port 8000`），可通过标准 HTTP GET 请求获取结构化建仓演练计划：
+本地后台服务启动后（`python3 server.py --port 8000`），可通过标准 HTTP GET 请求获取结构化建仓演练计划（默认 `taker_taker`）：
 
 ```bash
-curl -s "http://localhost:8000/api/build-arbitrage?exchange=hyperliquid&symbol=HYPE&spot_symbol=@107&amount_qty=1&execution_mode=maker_taker" | jq .
+curl -s "http://localhost:8000/api/build-arbitrage?exchange=hyperliquid&symbol=HYPE&spot_symbol=@107&amount_qty=1" | jq .
 ```
 
 ### 1.3 常用全局别名极速调用 (推荐配置)
@@ -97,49 +97,51 @@ hl-ops orders
 
 ---
 
-## 4. 双腿订单执行时序与 SOP (Maker-Taker Execution)
+## 4. 双腿订单执行时序与 SOP (Taker-Taker Default Execution)
 
-为杜绝现货市价吃单的高昂费率（0.0672%）与盘口滑点，建仓严格执行 **Maker-Taker 触发对冲架构**：
+为了彻底消除**挂单暴露免费期权（Adverse Selection）**与行情急跌时的**单腿网络延迟（Legging Latency）**断头铡风险，建仓默认采用 **Taker-Taker 双边快速 IOC 吃单架构**：
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Trader as 交易指令 (CLI / API)
-    participant SpotLeg as 现货市场 (@107 买一)
-    participant Listener as 状态监听引擎
-    participant PerpLeg as 合约市场 (HYPE-PERP)
+    participant DepthGuard as L2 订单簿深度与滑点预检
+    participant SpotLeg as 现货市场 (@107 卖一)
+    participant PerpLeg as 合约市场 (HYPE-PERP 买一)
 
-    Trader->>SpotLeg: 1. 提交 Post-Only (Alo) 限价买单 (1.0 HYPE @ Best Bid $80.48)
-    Note over SpotLeg: 现货买单挂在盘口买一，等待对手方市价吃单 (0 敞口)
-    SpotLeg-->>Listener: 2. 现货全部成交 (Filled 1.0 HYPE)
-    activate Listener
-    Listener->>PerpLeg: 3. 毫秒级触发 IOC / 市价开空 (1.0 张 HYPE @ Best Bid $80.48)
-    deactivate Listener
-    PerpLeg-->>Trader: 4. 合约对冲完成，锁定 1:1 Delta 绝对中性
+    Trader->>DepthGuard: 1. 预检 L2 深度 (确认综合滑点 <= 0.15%)
+    DepthGuard-->>Trader: 深度充足，滑点达标通过
+    Trader->>SpotLeg: 2a. 并发提交现货 IOC 买单 (1.0 HYPE @ Best Ask)
+    Trader->>PerpLeg: 2b. 并发提交合约 IOC 卖单 (1.0 张 HYPE @ Best Bid)
+    SpotLeg-->>Trader: 现货即刻成交 (0 逆向选择 / 0 踏空)
+    PerpLeg-->>Trader: 合约即刻对冲 (0 裸奔敞口 / 锁定 1:1 Delta)
 ```
 
-### 4.1 双腿委托明细
+### 4.1 双腿委托明细 (Taker-Taker 默认)
 
-1. **Leg 1 (现货买入 - Trigger Leg)**：
+1. **Leg 1 (现货买入)**：
    - **标的**：`@107` (`HYPE/USDC`)
    - **方向**：`BUY`
    - **数量**：`1.00 HYPE`
-   - **委托价格**：盘口买一价（Best Bid，如 `$80.48`）
-   - **订单类型**：`Post-Only` (`{"limit": {"tif": "Alo"}}`)
-   - **费率**：享受 Maker 费率 **`0.0144%`**
-2. **Leg 2 (合约做空 - Hedge Leg)**：
+   - **委托价格**：盘口卖一价或滑点保护限价值（Best Ask）
+   - **订单类型**：`IOC` (`{"limit": {"tif": "Ioc"}}`)
+   - **费率**：Taker 费率 **`0.0672%`**
+2. **Leg 2 (合约做空)**：
    - **标的**：`HYPE` (Perp)
    - **方向**：`SELL`
    - **数量**：`1.00 张`
-   - **委托价格**：盘口买一价或设置滑点保护上限
+   - **委托价格**：盘口买一价（Best Bid）
    - **订单类型**：`IOC` (`{"limit": {"tif": "Ioc"}}`)
    - **费率**：Taker 费率 **`0.0432%`**
 
-### 4.2 手续费优化量化对比
+### 4.2 为什么必须以 Taker-Taker 为默认标准？
 
-- **全市价 (Taker-Taker) 进场费率**：$0.0672\% + 0.0432\% = 0.1104\%$
-- **Maker-Taker 进场费率**：$0.0144\% + 0.0432\% = \mathbf{0.0576\%}$
-- **费率节省比例**：**🔥 节省 47.8% 手续费**，回本时间直接减半。
+| 风险维度 | Maker-Taker (挂单触发) | Taker-Taker (双边 IOC 市价 - 默认) |
+| :--- | :--- | :--- |
+| **逆向选择 (Adverse Selection)** | ❌ **严重**：暴跌时机构优先砸向你的买单，必吃飞刀 | ✅ **零风险**：主动吃单，消灭暴露期权 |
+| **单腿裸奔敞口** | ❌ **存在 50~200ms 延迟**，暴跌时合约来不及对冲 | ✅ **零敞口**：两腿并发原子成交 |
+| **交易确定性** | ❌ 上涨踏空，暴跌被割 | ✅ 100% 确定成交并锁定 Delta 中性 |
+| **手续费差异** | 综合进场 0.0576% | 综合进场 0.1104% (差异仅 ~0.0528%，~15 小时资金费即平平) |
 
 ---
 

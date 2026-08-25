@@ -335,14 +335,25 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     coin = plan.get("coin", "HYPE")
     display_pair = plan.get("display_spot_pair", f"{coin}/USDC")
     raw_pair = plan.get("spot_pair", coin)
-    mode = plan.get("execution_mode", "maker_taker")
+    mode = plan.get("execution_mode", "taker_taker")
     scheme_d = plan.get("scheme_d", {})
     order_plan = plan.get("order_plan", {})
     spot_ord = order_plan.get("spot_order", {})
     perp_ord = order_plan.get("perp_order", {})
     fee_sum = order_plan.get("fee_summary", {})
 
-    mode_label = "⚡ Maker-Taker 触发对冲 (Alo Maker 挂单 + IOC 对冲)" if mode == "maker_taker" else "🚀 Taker-Taker 全市价吃单"
+    if mode == "taker_taker":
+        mode_label = "🚀 Taker-Taker 双边市价快速吃单 (推荐标准: 0 逆向选择 / 0 单腿敞口)"
+        spot_type_str = "IOC Taker"
+        perp_type_str = "IOC Taker"
+    elif mode == "maker_maker":
+        mode_label = "⚡ Maker-Maker 双边 Alo 纯挂单"
+        spot_type_str = "Post-Only (Alo)"
+        perp_type_str = "Post-Only (Alo)"
+    else:
+        mode_label = "⚡ Maker-Taker 触发对冲 (Alo Maker 挂单 + IOC 对冲)"
+        spot_type_str = "Post-Only (Alo)"
+        perp_type_str = "IOC Taker"
 
     if HAS_RICH:
         summary_text = (
@@ -352,7 +363,7 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
             f"[bold cyan]当前资金费率:[/bold cyan] {plan.get('hourly_funding', 0)*100:.5f}% / 1h | [bold green]Simple APR: {plan.get('apr_pct', 0):.2f}%[/bold green] | [bold green]Scheme D 实际 APR: {plan.get('effective_apr_pct', 0):.2f}%[/bold green]\n"
             f"[bold cyan]盘口期现基差:[/bold cyan] {plan.get('basis_spread_pct', 0):+.4f}% (现货: ${plan.get('target_spot_price', 0):,.4f} | 合约: ${plan.get('target_perp_price', 0):,.4f})\n"
             f"[bold cyan]手续费回本周期:[/bold cyan] 单边进场: [bold white]{plan.get('entry_payback_str')}[/bold white] | 双边平仓: [bold white]{plan.get('roundtrip_payback_str')}[/bold white]\n"
-            f"[bold magenta]Maker-Taker 费率优化:[/bold magenta] [bold green]节省 +{fee_sum.get('fee_savings_pct', 0):.4f}% 手续费 (${fee_sum.get('fee_savings_usd', 0):.4f} USD)[/bold green]"
+            f"[bold magenta]综合进场费率:[/bold magenta] [bold cyan]{fee_sum.get('base_fee_pct', 0):.4f}%[/bold cyan] (双边平仓摩擦: {fee_sum.get('base_fee_pct', 0)*2.0:.4f}%)"
         )
         panel = Panel(summary_text, title=f"[bold magenta]🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利建仓方案 ({coin})[/bold magenta]")
 
@@ -373,8 +384,8 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
             "[green]BUY[/green]",
             f"{spot_ord.get('sz', 0):,.4f} {coin}",
             f"${spot_ord.get('limit_px', 0):,.4f}",
-            "Post-Only (Alo)",
-            spot_ord.get("role", "Trigger Leg (现货买一挂单)"),
+            spot_type_str,
+            spot_ord.get("role", "现货买单"),
             f"{spot_ord.get('fee_pct', 0):.4f}%"
         )
         order_table.add_row(
@@ -383,8 +394,8 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
             "[red]SELL[/red]",
             f"{perp_ord.get('sz', 0):,.4f} 张",
             f"${perp_ord.get('limit_px', 0):,.4f}",
-            "IOC Taker",
-            perp_ord.get("role", "Hedge Leg (现货成交毫秒对冲)"),
+            perp_type_str,
+            perp_ord.get("role", "合约空头对冲"),
             f"{perp_ord.get('fee_pct', 0):.4f}%"
         )
 
@@ -436,7 +447,7 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     line4 = pad_string(f"资金费率 : {plan.get('hourly_funding', 0)*100:.5f}%/1h (APR {plan.get('apr_pct', 0):.2f}%)", col1_w) + pad_string(f"Scheme D 实际 APR: {plan.get('effective_apr_pct', 0):.2f}%", col2_w)
     line5 = pad_string(f"现货买价 : ${plan.get('target_spot_price', 0):,.4f}", col1_w) + pad_string(f"合约卖价 : ${plan.get('target_perp_price', 0):,.4f} (基差 {plan.get('basis_spread_pct', 0):+.4f}%)", col2_w)
     line6 = pad_string(f"进场回本 : {plan.get('entry_payback_str')}", col1_w) + pad_string(f"双边回本 : {plan.get('roundtrip_payback_str')}", col2_w)
-    line7 = f"费率优化 : 节省 +{fee_sum.get('fee_savings_pct', 0):.4f}% 手续费 (${fee_sum.get('fee_savings_usd', 0):.4f} USD)"
+    line7 = f"综合费率 : 进场 {fee_sum.get('base_fee_pct', 0):.4f}% | 双边平仓 {fee_sum.get('base_fee_pct', 0)*2.0:.4f}%"
 
     box_lines = [line1, line2, "---", line3, line4, line5, line6, "---", line7]
     box = format_box(f"🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利建仓方案 ({coin})", box_lines, min_width=88)
@@ -444,8 +455,8 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     # Order table
     h_ord = ["交易腿 (Leg)", "标的 (Symbol)", "方向 (Side)", "数量 (Size)", "价格 (Price)", "订单类型 (Type)", "角色与时序", "费率"]
     r_ord = [
-        ["Leg 1 (现货)", f"{display_pair} ({raw_pair})", "BUY", f"{spot_ord.get('sz', 0):,.4f} {coin}", f"${spot_ord.get('limit_px', 0):,.4f}", "Post-Only (Alo)", spot_ord.get("role", "买一挂单"), f"{spot_ord.get('fee_pct', 0):.4f}%"],
-        ["Leg 2 (合约)", f"{coin}-PERP", "SELL", f"{perp_ord.get('sz', 0):,.4f} 张", f"${perp_ord.get('limit_px', 0):,.4f}", "IOC Taker", perp_ord.get("role", "对冲吃单"), f"{perp_ord.get('fee_pct', 0):.4f}%"]
+        ["Leg 1 (现货)", f"{display_pair} ({raw_pair})", "BUY", f"{spot_ord.get('sz', 0):,.4f} {coin}", f"${spot_ord.get('limit_px', 0):,.4f}", spot_type_str, spot_ord.get("role", "现货买单"), f"{spot_ord.get('fee_pct', 0):.4f}%"],
+        ["Leg 2 (合约)", f"{coin}-PERP", "SELL", f"{perp_ord.get('sz', 0):,.4f} 张", f"${perp_ord.get('limit_px', 0):,.4f}", perp_type_str, perp_ord.get("role", "合约对冲"), f"{perp_ord.get('fee_pct', 0):.4f}%"]
     ]
     tbl_ord = format_ascii_table("📋 双腿执行订单计划 (Order Execution Schedule)", h_ord, r_ord, ["left", "center", "center", "right", "right", "center", "left", "right"])
 
@@ -519,7 +530,7 @@ def main():
     arb_p.add_argument("--coin", type=str, default="HYPE", help="Target coin (default: HYPE)")
     arb_p.add_argument("--qty", type=float, default=None, help="Target token quantity (e.g. 1.0)")
     arb_p.add_argument("--usd", type=float, default=None, help="Target USD capital (e.g. 1000.0)")
-    arb_p.add_argument("--mode", type=str, default="maker_taker", choices=["maker_taker", "taker_taker", "maker_maker"], help="Execution mode (default: maker_taker)")
+    arb_p.add_argument("--mode", type=str, default="taker_taker", choices=["taker_taker", "maker_taker", "maker_maker"], help="Execution mode (default: taker_taker)")
     arb_p.add_argument("--dry-run", action="store_true", default=True, help="Simulate trade plan without live execution (default: True)")
     arb_p.add_argument("--force", action="store_true", help="Submit live orders to Hyperliquid (Requires Agent Wallet key & SDK)")
 

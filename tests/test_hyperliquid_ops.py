@@ -252,6 +252,18 @@ class TestHyperliquidExecutor(unittest.TestCase):
         self.assertAlmostEqual(plan["fee_summary"]["fee_savings_pct"], 0.0528)
         self.assertAlmostEqual(plan["fee_summary"]["fee_savings_usd"], 5.28)
 
+        # Default should be taker_taker
+        default_plan = self.executor.build_maker_taker_order_plan(
+            coin="PURR",
+            spot_pair="PURR/USDC",
+            target_usd=10000.0,
+            spot_price=0.10,
+            perp_price=0.101,
+            multiplier=1.0
+        )
+        self.assertEqual(default_plan["execution_mode"], "taker_taker")
+        self.assertEqual(default_plan["spot_order"]["order_type"], {"limit": {"tif": "Ioc"}})
+
     def test_resolve_spot_market_pair_hype(self):
         self.mock_client.get_spot_market_data.return_value = (
             [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150, "szDecimals": 2}],

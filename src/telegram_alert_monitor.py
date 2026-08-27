@@ -3,13 +3,14 @@ import time
 import threading
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Callable
 import src.env
 
 from src.hyperliquid_client import HyperliquidClient
 from src.bybit_client import BybitClient
 from src.calculator import FundingRateCalculator
 from src.telegram_notifier import TelegramNotifier
+from src.hyperliquid_ws import HyperliquidWsFeed
 
 logger = logging.getLogger("arbitrage_alert_monitor")
 
@@ -35,6 +36,8 @@ class ArbitrageAlertMonitor:
         min_apr_pct: Optional[float] = None,
         cooldown_minutes: Optional[float] = None,
         poll_interval: Optional[float] = None,
+        ws_feed: Optional[HyperliquidWsFeed] = None,
+        on_arbitrage_callback: Optional[Callable[[Dict[str, Any], str], None]] = None,
     ):
         self.hl_client = hl_client or HyperliquidClient()
         self.bybit_client = bybit_client or BybitClient()
@@ -118,17 +121,30 @@ class ArbitrageAlertMonitor:
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
 
+        # 7. WebSocket Feed for Hyperliquid (sub-second streaming & immediate event trigger)
+        self.ws_feed = ws_feed
+        if self.ws_feed is None and self.exchange in ["hyperliquid", "hl", "all"]:
+            self.ws_feed = HyperliquidWsFeed(symbols=self.symbols)
+        if self.ws_feed:
+            self.ws_feed.add_listener(self._on_ws_market_update)
+
+        self.on_arbitrage_callback = on_arbitrage_callback
+
     def is_enabled(self) -> bool:
         """Returns True if alert monitoring is enabled and Telegram credentials exist."""
         return self.enabled and self.notifier.is_configured()
 
     def start(self):
-        """Starts the background monitoring daemon thread."""
+        """Starts the background monitoring daemon thread and WebSocket feed."""
         if self._is_running:
             return
         if not self.is_enabled():
             logger.info("ArbitrageAlertMonitor is disabled or Telegram credentials missing.")
             return
+
+        # Start WebSocket feed if available
+        if self.ws_feed:
+            self.ws_feed.start()
 
         self._stop_event.clear()
         self._is_running = True
@@ -146,14 +162,88 @@ class ArbitrageAlertMonitor:
         )
 
     def stop(self):
-        """Stops the background monitoring thread."""
+        """Stops the background monitoring thread and WebSocket feed."""
         if not self._is_running:
             return
         self._stop_event.set()
+        if self.ws_feed:
+            self.ws_feed.stop()
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
         self._is_running = False
         logger.info("ArbitrageAlertMonitor stopped.")
+
+    def _on_ws_market_update(self, metric: Dict[str, Any]):
+        """
+        Real-time event callback triggered by HyperliquidWsFeed upon L2/Ctx stream updates.
+        Evaluates conditions with sub-second latency and dispatches Telegram notification immediately.
+        """
+        coin = metric.get("coin", "")
+        if not self._matches_target_symbol(coin):
+            return
+        exchange = metric.get("exchange", "Hyperliquid")
+        now = time.time()
+        self._last_metrics[f"{exchange}:{coin}"] = {
+            "timestamp": now,
+            "spot_price": metric.get("spot_price"),
+            "perp_price": metric.get("perp_price"),
+            "spread_pct": metric.get("spread_pct"),
+            "taker_spread_pct": metric.get("taker_spread_pct"),
+            "hourly_funding_pct": metric.get("hourly_funding_pct"),
+            "apr_pct": metric.get("apr_pct"),
+            "source": "websocket"
+        }
+
+        # Check conditions
+        is_triggered, reasons, trigger_key = self.evaluate_conditions(metric)
+        if not is_triggered:
+            return
+
+        cooldown_key = f"{exchange}:{coin}:{trigger_key}"
+        last_sent = self._last_alerts.get(cooldown_key, 0.0)
+        cooldown_secs = self.cooldown_minutes * 60.0
+
+        if (now - last_sent) < cooldown_secs:
+            return
+
+        # Pre-hook for future automated execution if configured
+        if self.on_arbitrage_callback:
+            try:
+                self.on_arbitrage_callback(metric, trigger_key)
+            except Exception as e:
+                logger.error(f"Error in on_arbitrage_callback: {e}", exc_info=True)
+
+        msg = self.format_alert_message(metric, reasons, trigger_key)
+        success, err_or_msg = self.notifier.send_message(msg)
+
+        alert_record = {
+            "timestamp": now,
+            "datetime": datetime.now(timezone.utc).isoformat(),
+            "exchange": exchange,
+            "coin": coin,
+            "reasons": reasons,
+            "trigger_key": trigger_key,
+            "success": success,
+            "response": err_or_msg,
+            "source": "websocket",
+            "metrics": {
+                "spot_price": metric.get("spot_price"),
+                "perp_price": metric.get("perp_price"),
+                "spread_pct": metric.get("spread_pct"),
+                "taker_spread_pct": metric.get("taker_spread_pct"),
+                "apr_pct": metric.get("apr_pct"),
+            }
+        }
+        self._alert_history.append(alert_record)
+        if len(self._alert_history) > 100:
+            self._alert_history.pop(0)
+
+        if success:
+            self._last_alerts[cooldown_key] = now
+            self._total_alerts_sent += 1
+            logger.info(f"⚡ [Realtime WS Alert] Telegram alert sent for {exchange}:{coin} ({trigger_key})")
+        else:
+            logger.error(f"Failed to send Telegram alert for {exchange}:{coin}: {err_or_msg}")
 
     def _run_loop(self):
         while not self._stop_event.is_set():
@@ -396,6 +486,7 @@ class ArbitrageAlertMonitor:
             "last_check_timestamp": self._last_check_time,
             "last_check_datetime": datetime.fromtimestamp(self._last_check_time, tz=timezone.utc).isoformat() if self._last_check_time else None,
             "total_alerts_sent": self._total_alerts_sent,
+            "ws_feed": self.ws_feed.get_health() if self.ws_feed else {"ws_connected": False, "enabled": False},
             "last_metrics": self._last_metrics,
             "recent_alerts": self._alert_history[-10:],
         }

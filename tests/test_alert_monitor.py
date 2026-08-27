@@ -231,6 +231,78 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
         self.assertEqual(status["symbols"], ["HYPER"])
         self.assertEqual(status["min_spread_pct"], 0.15)
         self.assertEqual(status["min_apr_pct"], 25.0)
+        self.assertIn("ws_feed", status)
+
+    def test_ws_market_update_triggers_realtime_alert(self):
+        """Verifies that _on_ws_market_update dispatches Telegram alert in real-time."""
+        monitor = ArbitrageAlertMonitor(
+            notifier=self.mock_notifier,
+            symbols=["HYPER"],
+            min_spread_pct=0.10,
+            min_apr_pct=20.0
+        )
+        ws_metric = {
+            "exchange": "Hyperliquid",
+            "coin": "HYPE",
+            "spot_pair": "HYPE/USDC",
+            "spot_price": 82.00,
+            "perp_price": 82.164,
+            "spread_pct": 0.20,
+            "taker_spread_pct": 0.19,
+            "hourly_funding_pct": 0.00125,
+            "apr_pct": 10.95,
+            "source": "websocket"
+        }
+        monitor._on_ws_market_update(ws_metric)
+        self.assertEqual(self.mock_notifier.send_message.call_count, 1)
+        self.assertEqual(monitor._total_alerts_sent, 1)
+
+    def test_ws_market_update_calls_automated_callback(self):
+        """Verifies that on_arbitrage_callback hook is invoked for automated trade execution."""
+        auto_callback = MagicMock()
+        monitor = ArbitrageAlertMonitor(
+            notifier=self.mock_notifier,
+            symbols=["HYPER"],
+            min_spread_pct=0.10,
+            on_arbitrage_callback=auto_callback
+        )
+        ws_metric = {
+            "exchange": "Hyperliquid",
+            "coin": "HYPE",
+            "spot_pair": "HYPE/USDC",
+            "spot_price": 82.00,
+            "perp_price": 82.164,
+            "spread_pct": 0.20,
+            "hourly_funding_pct": 0.00125,
+            "apr_pct": 10.95,
+            "source": "websocket"
+        }
+        monitor._on_ws_market_update(ws_metric)
+        auto_callback.assert_called_once()
+        called_metric, trigger_key = auto_callback.call_args[0]
+        self.assertEqual(called_metric["coin"], "HYPE")
+        self.assertEqual(trigger_key, "spread")
+
+    def test_ws_market_update_ignores_untracked_symbol(self):
+        """Verifies that _on_ws_market_update ignores symbols not in monitor.symbols."""
+        monitor = ArbitrageAlertMonitor(
+            notifier=self.mock_notifier,
+            symbols=["HYPER"],
+            min_spread_pct=0.10,
+        )
+        ws_metric = {
+            "exchange": "Hyperliquid",
+            "coin": "SOL",
+            "spot_price": 150.00,
+            "perp_price": 155.00,
+            "spread_pct": 3.33,
+            "apr_pct": 50.0,
+            "source": "websocket"
+        }
+        monitor._on_ws_market_update(ws_metric)
+        self.assertEqual(self.mock_notifier.send_message.call_count, 0)
+        self.assertEqual(monitor._total_alerts_sent, 0)
+        self.assertNotIn("Hyperliquid:SOL", monitor._last_metrics)
 
 if __name__ == "__main__":
     unittest.main()

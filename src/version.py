@@ -10,7 +10,7 @@ def get_diagnostics() -> dict:
     """Returns diagnostic information about runtime environment, dependencies, and tools."""
     # Check dependencies
     deps = {}
-    for mod in ["rich", "hyperliquid", "eth_account", "web3", "requests", "urllib3"]:
+    for mod in ["rich", "hyperliquid", "eth_account", "web3", "requests", "urllib3", "websocket"]:
         try:
             m = __import__(mod)
             v = getattr(m, "__version__", "available")

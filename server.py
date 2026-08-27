@@ -753,6 +753,8 @@ def start_web_server(port: int,
     print(f"💡 SSH端口映射 (Tunnel): ssh -L {port}:localhost:{port} user@35.75.35.2")
     if alert_monitor and alert_monitor.is_enabled():
         print(f"🤖 Telegram 告警监听:  已启用 (标的: {', '.join(alert_monitor.symbols)} | 交易所: {alert_monitor.exchange})")
+        ws_mode = "⚡ WebSocket 实时推流 (毫秒级响应 + 断线容灾)" if alert_monitor.ws_feed else f"🔄 REST 轮询 (间隔: {alert_monitor.poll_interval}s)"
+        print(f"   ├─ 行情订阅模式: {ws_mode}")
         print(f"   ├─ 参考基差: {'开启 (>= +' + str(alert_monitor.min_spread_pct) + '%)' if alert_monitor.check_spread else '关闭'}")
         print(f"   ├─ 参考费率: {'开启 (>= +' + str(alert_monitor.min_apr_pct) + '%)' if alert_monitor.check_funding else '关闭'}")
         print(f"   └─ 巡检间隔: {alert_monitor.poll_interval}s | 冷却时间: {alert_monitor.cooldown_minutes}m")

@@ -8,6 +8,7 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
 
 - **`src/env.py`**: Zero-dependency environment loader with strict Twelve-Factor priority (`os.environ` / `gopass env` > `.env` decoy fallback).
 - **`src/hyperliquid_client.py`**: Client for Hyperliquid info API (`metaAndAssetCtxs`, `spotMetaAndAssetCtxs`, `l2Book`, `clearinghouseState`, `spotClearinghouseState`, `openOrders`, `extraAgents`).
+- **`src/hyperliquid_ws.py`**: High-performance real-time WebSocket client (`allMids`, `l2Book`, `activeAssetCtx`) with error logging, auto-reconnect, and sub-second basis spread calculation.
 - **`src/hyperliquid_executor.py`**: Agent Wallet (API Wallet) executor, zero-risk canary testing, Scheme D health & liquidation distance evaluation, deadman switch, USD transfer, and emergency deleveraging.
 - **`src/bybit_client.py`**: Client for Bybit V5 Public/Private REST API (`tickers`, `funding/history`, `orderbook`, `order/create`).
 - **`src/calculator.py`**: Mathematical models for:
@@ -49,6 +50,18 @@ python3 monitor.py --exchange bybit --live --interval 5
 ### Running Web Server
 ```bash
 python3 server.py --port 8000
+```
+
+### Hyperliquid API 运维与实盘操作 (需 Gopass 注入凭据)
+```bash
+# 1. 运行 API Wallet 诊断与金丝雀验活
+gopass env trading/hyperliquid python3 scripts/hl_ops.py check
+
+# 2. 查询账户健康状态与现货/合约仓位
+gopass env trading/hyperliquid python3 scripts/hl_ops.py status
+
+# 3. 提交实盘对冲建仓 (Taker-Taker 双边吃单)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --force
 ```
 
 ---
@@ -100,5 +113,14 @@ python3 server.py --port 8000
   - **Perp Leg**: Trigger millisecond IOC/Market taker orders upon spot fill.
   - **Trade-off**: Lower fee friction but exposed to limit order adverse selection / toxic flow in high-volatility regimes.
 - **Reference**: See [`docs/maker_taker_execution_architecture.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/maker_taker_execution_architecture.md) and [`docs/hyperliquid_hype_delta_neutral_arbitrage.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/hyperliquid_hype_delta_neutral_arbitrage.md).
+
+### 3.6 凭据安全与 Gopass 原生注入铁律 (Twelve-Factor Invariant)
+- **Gopass 注入第一优先级**：当前开发与运行环境使用 `gopass` 托管核心交易密钥。
+  - Hyperliquid 凭据路径：`trading/hyperliquid/` (包含 `HL_AGENT_PRIVATE_KEY`)
+  - Bybit 凭据路径：`trading/bybit/` (包含 `BYBIT_API_SECRET`)
+- **严禁裸跑依赖 `.env` 私钥**：
+  - 本地 `.env` 中的 `HL_AGENT_PRIVATE_KEY` 属于诱饵防误触假 Key（Decoy/Honeypot）。
+  - Agent 在执行任何涉及账户签名、金丝雀验活（`hl_ops.py check`）、仓位划转或实盘下单的操作时，**必须强制前缀 `gopass env trading/hyperliquid`**。
+
 
 

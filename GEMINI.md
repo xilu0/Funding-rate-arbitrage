@@ -25,6 +25,7 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
 - **`monitor.py`**: Terminal CLI interface with Rich formatting, live updating, and sorting/filtering.
 - **`web/`**: Dashboard frontend (`index.html`, `app.js`, `style.css`).
 - **`tests/`**: Unit test suite for clients, calculator, depth capacity, Bybit executor, and Hyperliquid ops.
+- **`docs/hyperliquid_node_guide.md`**: Self-hosted Hyperliquid node (`hl2`) architecture, capability matrix, latency/freshness benchmarks, and ops runbook.
 - **`.agents/skills/`**: Domain skills (e.g., `altcoin-4v-research`, `hyperliquid-collateral-arbitrage`).
 
 ---
@@ -121,6 +122,15 @@ gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE -
 - **严禁裸跑依赖 `.env` 私钥**：
   - 本地 `.env` 中的 `HL_AGENT_PRIVATE_KEY` 属于诱饵防误触假 Key（Decoy/Honeypot）。
   - Agent 在执行任何涉及账户签名、金丝雀验活（`hl_ops.py check`）、仓位划转或实盘下单的操作时，**必须强制前缀 `gopass env trading/hyperliquid`**。
+
+### 3.7 双机自建节点接入优先级铁律 (Dual-Node Network Invariants)
+- **成交推流第一优先级 (WebSocket Priority 1)**：
+  - 实时成交（`user_fills`）订阅**必须优先接入 `hl1` 内网专线**：`ws://10.1.3.164:8000/ws`（同 VPC 延迟 $< 0.5\text{ms}$，极值领先官方 83ms）。
+  - 官方 `wss://api.hyperliquid.xyz/ws` 仅作为全量盘口（`l2Book`）、卖单与断线自动兜底。
+- **状态查询第一优先级 (Info API Priority 1)**：
+  - 账户资产与持仓（`clearinghouseState`、`openOrders`）**必须优先查询 `hl2` 内网端口**：`http://10.1.3.165:3001/info`（响应 1.2ms，提速 23 倍且免 Rate Limit）。
+  - 必须配合同步滞后守卫（`SyncLag <= 2.0s`），异常时无感回退官方 `https://api.hyperliquid.xyz/info`。
+- **详细参考**：完整双机拓扑、报文契约、实测基准与 Runbook 参见 [`docs/hyperliquid_node_guide.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/hyperliquid_node_guide.md)。
 
 
 

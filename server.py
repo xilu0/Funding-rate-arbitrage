@@ -14,6 +14,8 @@ from src.calculator import (
     DEFAULT_BYBIT_SPOT_TAKER_FEE,
     DEFAULT_BYBIT_PERP_TAKER_FEE
 )
+from src.telegram_notifier import TelegramNotifier
+from src.telegram_alert_monitor import ArbitrageAlertMonitor
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -22,6 +24,7 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
     bybit_client: BybitClient = None
     calculator: FundingRateCalculator = None
     storage: FundingHistoryStorage = None
+    alert_monitor: Optional[ArbitrageAlertMonitor] = None
     cache: Dict[str, Any] = {}
 
     def __init__(self, *args, **kwargs):
@@ -51,9 +54,70 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.handle_api_depth_capacity(parsed.query)
         elif path in ["/api/build-arbitrage", "/api/bybit/build-arbitrage"]:
             self.handle_api_build_arbitrage(parsed.query)
+        elif path == "/api/telegram/status":
+            self.handle_api_telegram_status()
+        elif path == "/api/telegram/test":
+            self.handle_api_telegram_test()
         else:
             # Fallback to serving static files from web/ directory
             super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if path == "/api/telegram/test":
+            self.handle_api_telegram_test()
+        else:
+            self.send_error(404, "Not Found")
+
+    def handle_api_telegram_status(self):
+        if self.alert_monitor:
+            status_data = self.alert_monitor.get_status()
+        else:
+            status_data = {
+                "enabled": False,
+                "is_configured": False,
+                "is_running": False,
+                "message": "Alert monitor not initialized"
+            }
+        payload = {"status": "success", "data": status_data}
+        response_bytes = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(response_bytes)))
+        self.end_headers()
+        self.wfile.write(response_bytes)
+
+    def handle_api_telegram_test(self):
+        if not self.alert_monitor or not self.alert_monitor.notifier.is_configured():
+            payload = {
+                "status": "error",
+                "message": "Telegram Bot Token or Chat ID not configured (check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)"
+            }
+            status_code = 400
+        else:
+            success, msg = self.alert_monitor.notifier.send_message(
+                "🧪 *【Capital Arbitrage Telegram 告警连通性测试】*\n\n"
+                "✅ 收到此消息表示 Telegram Bot、Chat ID 与网络代理配置完全正常！\n"
+                f"📡 监听交易所: `{self.alert_monitor.exchange}`\n"
+                f"🪙 监听标的: `{', '.join(self.alert_monitor.symbols)}`\n"
+                f"📊 参考基差: `{'开启 (>= +' + str(self.alert_monitor.min_spread_pct) + '%)' if self.alert_monitor.check_spread else '关闭'}`\n"
+                f"💰 参考费率: `{'开启 (>= +' + str(self.alert_monitor.min_apr_pct) + '%)' if self.alert_monitor.check_funding else '关闭'}`"
+            )
+            payload = {
+                "status": "success" if success else "error",
+                "result": msg
+            }
+            status_code = 200 if success else 500
+
+        response_bytes = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(response_bytes)))
+        self.end_headers()
+        self.wfile.write(response_bytes)
 
     def handle_api_build_arbitrage(self, query_str: str):
         params = urllib.parse.parse_qs(query_str)
@@ -671,10 +735,15 @@ def start_web_server(port: int,
                      hl_client: HyperliquidClient, 
                      bybit_client: BybitClient,
                      calculator: FundingRateCalculator, 
-                     interval: int = 30):
+                     interval: int = 30,
+                     alert_monitor: Optional[ArbitrageAlertMonitor] = None):
     ArbitrageServerHandler.hl_client = hl_client
     ArbitrageServerHandler.bybit_client = bybit_client
     ArbitrageServerHandler.calculator = calculator
+    ArbitrageServerHandler.alert_monitor = alert_monitor
+
+    if alert_monitor and alert_monitor.is_enabled():
+        alert_monitor.start()
 
     server = ThreadingHTTPServer(("0.0.0.0", port), ArbitrageServerHandler)
     print(f"===========================================================")
@@ -682,12 +751,21 @@ def start_web_server(port: int,
     print(f"👉 本地访问 (Local):   http://localhost:{port}")
     print(f"👉 远程访问 (Remote):  http://35.75.35.2:{port}")
     print(f"💡 SSH端口映射 (Tunnel): ssh -L {port}:localhost:{port} user@35.75.35.2")
+    if alert_monitor and alert_monitor.is_enabled():
+        print(f"🤖 Telegram 告警监听:  已启用 (标的: {', '.join(alert_monitor.symbols)} | 交易所: {alert_monitor.exchange})")
+        print(f"   ├─ 参考基差: {'开启 (>= +' + str(alert_monitor.min_spread_pct) + '%)' if alert_monitor.check_spread else '关闭'}")
+        print(f"   ├─ 参考费率: {'开启 (>= +' + str(alert_monitor.min_apr_pct) + '%)' if alert_monitor.check_funding else '关闭'}")
+        print(f"   └─ 巡检间隔: {alert_monitor.poll_interval}s | 冷却时间: {alert_monitor.cooldown_minutes}m")
+    else:
+        print(f"🤖 Telegram 告警监听:  未启用 (如需启用请在 .env 中配置 TELEGRAM_ALERT_ENABLED=true 与 Token)")
     print(f"===========================================================")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down web server...")
+        if alert_monitor:
+            alert_monitor.stop()
         server.server_close()
 
 def main():
@@ -697,6 +775,18 @@ def main():
     parser.add_argument("--interval", type=int, default=30, help="Refresh interval (default: 30)")
     parser.add_argument("--spot-fee", type=float, default=None, help="Spot taker fee percentage (e.g. 0.07)")
     parser.add_argument("--perp-fee", type=float, default=None, help="Perp taker fee percentage (e.g. 0.035)")
+
+    # Telegram Bot alert monitor CLI overrides
+    parser.add_argument("--telegram-alert", action="store_true", default=None, help="Force enable Telegram bot alert monitor")
+    parser.add_argument("--no-telegram-alert", action="store_true", default=False, help="Force disable Telegram bot alert monitor")
+    parser.add_argument("--alert-exchange", type=str, default=None, help="Exchange to monitor (hyperliquid/bybit/all, default: hyperliquid)")
+    parser.add_argument("--alert-symbols", type=str, default=None, help="Symbols to monitor, comma-separated (default: HYPER)")
+    parser.add_argument("--alert-check-spread", type=str, default=None, help="Whether to check basis spread (true/false)")
+    parser.add_argument("--alert-spread", type=float, default=None, help="Basis spread threshold percentage (e.g. 0.10 for 0.10%%)")
+    parser.add_argument("--alert-check-funding", type=str, default=None, help="Whether to check funding rate (true/false)")
+    parser.add_argument("--alert-apr", type=float, default=None, help="Funding rate APR threshold percentage (e.g. 20.0 for 20%%)")
+    parser.add_argument("--alert-interval", type=float, default=None, help="Alert monitor check interval in seconds (default: 30)")
+    parser.add_argument("--alert-cooldown", type=float, default=None, help="Alert cooldown in minutes (default: 30)")
     args = parser.parse_args()
 
     hl_client = HyperliquidClient()
@@ -708,7 +798,40 @@ def main():
         spot_taker_fee=spot_fee,
         perp_taker_fee=perp_fee
     )
-    start_web_server(args.port, hl_client, bybit_client, calculator, args.interval)
+
+    # Resolve Telegram Alert Monitor settings
+    enabled_override = None
+    if args.no_telegram_alert:
+        enabled_override = False
+    elif args.telegram_alert:
+        enabled_override = True
+
+    check_spread_override = None
+    if args.alert_check_spread is not None:
+        check_spread_override = args.alert_check_spread.lower() in ["true", "1", "yes"]
+
+    check_funding_override = None
+    if args.alert_check_funding is not None:
+        check_funding_override = args.alert_check_funding.lower() in ["true", "1", "yes"]
+
+    alert_symbols = [s.strip() for s in args.alert_symbols.split(",")] if args.alert_symbols else None
+
+    alert_monitor = ArbitrageAlertMonitor(
+        hl_client=hl_client,
+        bybit_client=bybit_client,
+        calculator=calculator,
+        enabled=enabled_override,
+        exchange=args.alert_exchange,
+        symbols=alert_symbols,
+        check_spread=check_spread_override,
+        min_spread_pct=args.alert_spread,
+        check_funding=check_funding_override,
+        min_apr_pct=args.alert_apr,
+        cooldown_minutes=args.alert_cooldown,
+        poll_interval=args.alert_interval
+    )
+
+    start_web_server(args.port, hl_client, bybit_client, calculator, args.interval, alert_monitor=alert_monitor)
 
 if __name__ == "__main__":
     main()

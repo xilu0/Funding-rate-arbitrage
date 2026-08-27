@@ -330,8 +330,8 @@ def render_orders_table(orders: list) -> Any:
     return format_ascii_table("📝 活动挂单监控 (Open Orders)", headers, rows, ["right", "left", "center", "right", "right", "center"])
 
 
-def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
-    """Renders comprehensive Arbitrage Plan and Scheme D Risk Allocation tables."""
+def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
+    """Renders comprehensive Arbitrage Plan, PnL & Yield Analysis, and Scheme D Risk Allocation tables."""
     coin = plan.get("coin", "HYPE")
     display_pair = plan.get("display_spot_pair", f"{coin}/USDC")
     raw_pair = plan.get("spot_pair", coin)
@@ -341,9 +341,10 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     spot_ord = order_plan.get("spot_order", {})
     perp_ord = order_plan.get("perp_order", {})
     fee_sum = order_plan.get("fee_summary", {})
+    multi_h = plan.get("multi_horizon_analysis", {})
 
     if mode == "taker_taker":
-        mode_label = "🚀 Taker-Taker 双边市价快速吃单 (推荐标准: 0 逆向选择 / 0 单腿敞口)"
+        mode_label = "🚀 Taker-Taker 双边市价快速吃单 (0 逆向选择 / 0 单腿敞口)"
         spot_type_str = "IOC Taker"
         perp_type_str = "IOC Taker"
     elif mode == "maker_maker":
@@ -355,17 +356,21 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
         spot_type_str = "Post-Only (Alo)"
         perp_type_str = "IOC Taker"
 
+    spread_pct = plan.get("basis_spread_pct", 0.0)
+    basis_badge = plan.get("basis_badge", "[升水]") if HAS_RICH else plan.get("basis_plain_badge", "[升水]")
+    basis_usd = plan.get("basis_spread_usd", 0.0)
+
     if HAS_RICH:
         summary_text = (
             f"[bold yellow]套利标的:[/bold yellow] [bold white]{coin}[/bold white] (现货对: [cyan]{display_pair}[/cyan] [dim]({raw_pair})[/dim] | 永续: [cyan]{coin}-PERP[/cyan])\n"
             f"[bold yellow]执行架构:[/bold yellow] [bold green]{mode_label}[/bold green]\n"
-            f"[bold cyan]建仓规模:[/bold cyan] {plan.get('spot_qty', 0):,.4f} {coin} (~${plan.get('spot_notional_usd', 0):,.2f} USD)\n"
-            f"[bold cyan]当前资金费率:[/bold cyan] {plan.get('hourly_funding', 0)*100:.5f}% / 1h | [bold green]Simple APR: {plan.get('apr_pct', 0):.2f}%[/bold green] | [bold green]Scheme D 实际 APR: {plan.get('effective_apr_pct', 0):.2f}%[/bold green]\n"
-            f"[bold cyan]盘口期现基差:[/bold cyan] {plan.get('basis_spread_pct', 0):+.4f}% (现货: ${plan.get('target_spot_price', 0):,.4f} | 合约: ${plan.get('target_perp_price', 0):,.4f})\n"
-            f"[bold cyan]手续费回本周期:[/bold cyan] 单边进场: [bold white]{plan.get('entry_payback_str')}[/bold white] | 双边平仓: [bold white]{plan.get('roundtrip_payback_str')}[/bold white]\n"
-            f"[bold magenta]综合进场费率:[/bold magenta] [bold cyan]{fee_sum.get('base_fee_pct', 0):.4f}%[/bold cyan] (双边平仓摩擦: {fee_sum.get('base_fee_pct', 0)*2.0:.4f}%)"
+            f"[bold cyan]建仓规模:[/bold cyan] {plan.get('spot_qty', 0):,.4f} {coin} (~${plan.get('spot_notional_usd', 0):,.2f} USD) | [bold cyan]总本金需求:[/bold cyan] [bold green]${scheme_d.get('total_capital_required_usd', 0):,.2f} USDC[/bold green] (Scheme D 资金利用率: {scheme_d.get('capital_efficiency_pct', 90):.1f}%)\n"
+            f"[bold cyan]当前资金费率:[/bold cyan] {plan.get('hourly_funding', 0)*100:.5f}% / 1h | [bold green]Simple APR: {plan.get('apr_pct', 0):.2f}%[/bold green] | [bold green]Scheme D 实际资费 APR: {plan.get('effective_apr_pct', 0):.2f}%[/bold green]\n"
+            f"[bold cyan]盘口期现基差:[/bold cyan] {spread_pct:+.4f}% {basis_badge} [dim]({basis_usd:+.4f} USD)[/dim] (现货买: ${plan.get('target_spot_price', 0):,.4f} | 合约卖: ${plan.get('target_perp_price', 0):,.4f})\n"
+            f"[bold cyan]综合回本周期:[/bold cyan] 单边进场: [bold white]{plan.get('net_entry_payback_str')}[/bold white] [dim](纯手续费: {plan.get('pure_entry_payback_str')})[/dim] | 双边平仓: [bold white]{plan.get('net_roundtrip_payback_str')}[/bold white] [dim](纯手续费: {plan.get('pure_roundtrip_payback_str')})[/dim]\n"
+            f"[bold magenta]准入风控判定:[/bold magenta] {plan.get('basis_risk_note', '满足标准建仓条件')}"
         )
-        panel = Panel(summary_text, title=f"[bold magenta]🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利建仓方案 ({coin})[/bold magenta]")
+        panel = Panel(summary_text, title=f"[bold magenta]🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利方案 ({coin})[/bold magenta]")
 
         # Table 1: Orders
         order_table = Table(title="📋 双腿执行订单计划 (Order Execution Schedule)", show_lines=True, header_style="bold magenta")
@@ -399,7 +404,67 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
             f"{perp_ord.get('fee_pct', 0):.4f}%"
         )
 
-        # Table 2: Scheme D Allocation
+        # Table 2: PnL & Yield Analysis
+        pnl_table = Table(title="📊 收益与摩擦成本穿透矩阵 (PnL & Multi-Horizon Yield Analysis)", show_lines=True, header_style="bold cyan")
+        pnl_table.add_column("维度 / 收益与摩擦构成 (Component)", style="bold yellow")
+        pnl_table.add_column("费率 / 收益率 (%)", justify="right")
+        pnl_table.add_column("资金价值 (USD)", justify="right")
+        pnl_table.add_column("量化影响与属性说明 (Risk & Yield Notes)")
+
+        pnl_table.add_row(
+            "1. 资金费率预期年化",
+            f"[green]+{plan.get('effective_apr_pct', 0):.2f}% APR[/green]",
+            f"+${plan.get('annual_funding_usd', 0):,.2f}/年",
+            "Scheme D 实际有效资费收益 (90% 仓位持续产生)"
+        )
+        pnl_table.add_row(
+            "2. 期现建仓基差",
+            f"{spread_pct:+.4f}%",
+            f"{basis_usd:+.4f} USD",
+            f"{basis_badge} {'开仓锁定升水，平仓收敛兑现' if spread_pct >= 0 else '开仓贴水折价，构成建仓初始亏损'}"
+        )
+        pnl_table.add_row(
+            "3. 进场双腿手续费",
+            f"-{plan.get('entry_fee_pct', 0):.4f}%",
+            f"-${plan.get('entry_fee_usd', 0):,.4f} USD",
+            f"现货 {spot_ord.get('fee_pct', 0):.4f}% + 合约 {perp_ord.get('fee_pct', 0):.4f}%"
+        )
+        pnl_table.add_row(
+            "4. 预估平仓手续费摩擦",
+            f"-{plan.get('roundtrip_fee_pct', 0) - plan.get('entry_fee_pct', 0):.4f}%",
+            f"-${plan.get('roundtrip_fee_usd', 0) - plan.get('entry_fee_usd', 0):,.4f} USD",
+            "双边平仓摩擦预留"
+        )
+        pnl_table.add_row(
+            "[bold white]净建仓摩擦 (净进场成本)[/bold white]",
+            f"[bold cyan]{plan.get('net_entry_friction_pct', 0):+.4f}%[/bold cyan]",
+            f"[bold cyan]${plan.get('net_entry_friction_usd', 0):+.4f} USD[/bold cyan]",
+            "进场手续费 - 基差升水 (真实进场摩擦门槛)"
+        )
+        pnl_table.add_row(
+            "[bold white]双边完整净摩擦[/bold white]",
+            f"[bold magenta]{plan.get('net_roundtrip_friction_pct', 0):+.4f}%[/bold magenta]",
+            f"[bold magenta]${plan.get('net_roundtrip_friction_usd', 0):+.4f} USD[/bold magenta]",
+            "完整开平仓总摩擦 (真实回本基准线)"
+        )
+
+        # Multi-horizon row
+        m_30 = multi_h.get("30d", {})
+        m_90 = multi_h.get("90d", {})
+        m_365 = multi_h.get("365d", {})
+        multi_str = (
+            f"• [bold white]30 天稳健期[/bold white]: [bold green]{m_30.get('net_apr_pct', 0):+.2f}% APR[/bold green] (净收益 ${m_30.get('net_pnl_usd', 0):+.2f} USD │ 已摊薄摩擦)\n"
+            f"• [bold white]90 天标准期[/bold white]: [bold green]{m_90.get('net_apr_pct', 0):+.2f}% APR[/bold green] (净收益 ${m_90.get('net_pnl_usd', 0):+.2f} USD │ 接近理论资费)\n"
+            f"• [bold white]365 天长期持有[/bold white]: [bold green]{m_365.get('net_apr_pct', 0):+.2f}% APR[/bold green] (净收益 ${m_365.get('net_pnl_usd', 0):+.2f} USD │ 完全吸收摩擦)"
+        )
+        pnl_table.add_row(
+            "[bold cyan]🔮 持有期综合净年化[/bold cyan]\n(Net Realized APR)",
+            "[bold green]多周期测算[/bold green]",
+            "[bold green]净收益预估[/bold green]",
+            multi_str
+        )
+
+        # Table 3: Scheme D Allocation
         scheme_table = Table(title="🛡️ 方案 D 资金分配与量化风控矩阵 (Scheme D Risk & Collateral)", show_lines=True, header_style="bold green")
         scheme_table.add_column("配置资产 (Component)", style="bold yellow")
         scheme_table.add_column("分配比例 (Weight)", justify="center")
@@ -436,21 +501,21 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
             f"[bold red]理论强平价: ${scheme_d.get('theoretical_liq_price', 0):,.2f} (+{scheme_d.get('liq_distance_pct', 192.4):.1f}% 安全垫)[/bold red]"
         )
 
-        return panel, order_table, scheme_table
+        return panel, order_table, pnl_table, scheme_table
 
     # Plain ASCII Formatter
     col1_w = 44
     col2_w = 44
     line1 = f"套利标的 : {coin} (现货: {display_pair} [{raw_pair}] | 永续: {coin}-PERP)"
     line2 = f"执行架构 : {mode_label}"
-    line3 = pad_string(f"建仓规模 : {plan.get('spot_qty', 0):,.4f} {coin}", col1_w) + pad_string(f"名义价值 : ${plan.get('spot_notional_usd', 0):,.2f} USD", col2_w)
+    line3 = pad_string(f"建仓规模 : {plan.get('spot_qty', 0):,.4f} {coin}", col1_w) + pad_string(f"本金需求 : ${scheme_d.get('total_capital_required_usd', 0):,.2f} USDC", col2_w)
     line4 = pad_string(f"资金费率 : {plan.get('hourly_funding', 0)*100:.5f}%/1h (APR {plan.get('apr_pct', 0):.2f}%)", col1_w) + pad_string(f"Scheme D 实际 APR: {plan.get('effective_apr_pct', 0):.2f}%", col2_w)
-    line5 = pad_string(f"现货买价 : ${plan.get('target_spot_price', 0):,.4f}", col1_w) + pad_string(f"合约卖价 : ${plan.get('target_perp_price', 0):,.4f} (基差 {plan.get('basis_spread_pct', 0):+.4f}%)", col2_w)
-    line6 = pad_string(f"进场回本 : {plan.get('entry_payback_str')}", col1_w) + pad_string(f"双边回本 : {plan.get('roundtrip_payback_str')}", col2_w)
-    line7 = f"综合费率 : 进场 {fee_sum.get('base_fee_pct', 0):.4f}% | 双边平仓 {fee_sum.get('base_fee_pct', 0)*2.0:.4f}%"
+    line5 = pad_string(f"现货买价 : ${plan.get('target_spot_price', 0):,.4f}", col1_w) + pad_string(f"合约卖价 : ${plan.get('target_perp_price', 0):,.4f} (基差 {spread_pct:+.4f}% {plan.get('basis_plain_badge', '')})", col2_w)
+    line6 = pad_string(f"综合回本 : 进场 {plan.get('net_entry_payback_str')}", col1_w) + pad_string(f"双边平仓 {plan.get('net_roundtrip_payback_str')}", col2_w)
+    line7 = f"准入风控 : {plan.get('basis_risk_note', '正常')}"
 
     box_lines = [line1, line2, "---", line3, line4, line5, line6, "---", line7]
-    box = format_box(f"🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利建仓方案 ({coin})", box_lines, min_width=88)
+    box = format_box(f"🚀 Hyperliquid 1:1 Delta-Neutral 资金费率套利方案 ({coin})", box_lines, min_width=88)
 
     # Order table
     h_ord = ["交易腿 (Leg)", "标的 (Symbol)", "方向 (Side)", "数量 (Size)", "价格 (Price)", "订单类型 (Type)", "角色与时序", "费率"]
@@ -459,6 +524,21 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
         ["Leg 2 (合约)", f"{coin}-PERP", "SELL", f"{perp_ord.get('sz', 0):,.4f} 张", f"${perp_ord.get('limit_px', 0):,.4f}", perp_type_str, perp_ord.get("role", "合约对冲"), f"{perp_ord.get('fee_pct', 0):.4f}%"]
     ]
     tbl_ord = format_ascii_table("📋 双腿执行订单计划 (Order Execution Schedule)", h_ord, r_ord, ["left", "center", "center", "right", "right", "center", "left", "right"])
+
+    # PnL & Multi-horizon table
+    m_30 = multi_h.get("30d", {})
+    m_90 = multi_h.get("90d", {})
+    m_365 = multi_h.get("365d", {})
+    h_pnl = ["收益与摩擦构成 (Component)", "费率 (%)", "资金价值 (USD)", "量化说明与多周期测算"]
+    r_pnl = [
+        ["1. 资费预期年化", f"+{plan.get('effective_apr_pct', 0):.2f}% APR", f"+${plan.get('annual_funding_usd', 0):,.2f}/年", "Scheme D 有效资费收益"],
+        ["2. 期现建仓基差", f"{spread_pct:+.4f}%", f"{basis_usd:+.4f} USD", f"{plan.get('basis_plain_badge', '')} 建仓基差差价"],
+        ["3. 进场双腿手续费", f"-{plan.get('entry_fee_pct', 0):.4f}%", f"-${plan.get('entry_fee_usd', 0):,.4f} USD", "现货买入 + 合约卖出 Taker 费率"],
+        ["净建仓摩擦", f"{plan.get('net_entry_friction_pct', 0):+.4f}%", f"${plan.get('net_entry_friction_usd', 0):+.4f} USD", f"净进场摩擦 (回本: {plan.get('net_entry_payback_str')})"],
+        ["双边完整净摩擦", f"{plan.get('net_roundtrip_friction_pct', 0):+.4f}%", f"${plan.get('net_roundtrip_friction_usd', 0):+.4f} USD", f"完整开平仓摩擦 (回本: {plan.get('net_roundtrip_payback_str')})"],
+        ["30D / 90D / 365D 净年化", f"{m_30.get('net_apr_pct', 0):+.2f}% / {m_90.get('net_apr_pct', 0):+.2f}%", f"${m_30.get('net_pnl_usd', 0):+.2f} / ${m_90.get('net_pnl_usd', 0):+.2f}", f"365D 长期净年化: {m_365.get('net_apr_pct', 0):+.2f}% (${m_365.get('net_pnl_usd', 0):+.2f})"]
+    ]
+    tbl_pnl = format_ascii_table("📊 收益与摩擦成本穿透矩阵 (PnL & Multi-Horizon Yield Analysis)", h_pnl, r_pnl, ["left", "right", "right", "left"])
 
     # Scheme D table
     h_sch = ["配置资产 (Component)", "分配比例", "资金占用 (USD)", "质押/折算属性", "量化风控说明"]
@@ -470,7 +550,7 @@ def render_arbitrage_plan(plan: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     ]
     tbl_sch = format_ascii_table("🛡️ 方案 D 资金分配与量化风控矩阵 (Scheme D Risk & Collateral)", h_sch, r_sch, ["left", "center", "right", "left", "left"])
 
-    return box, tbl_ord, tbl_sch
+    return box, tbl_ord, tbl_pnl, tbl_sch
 
 
 def main():
@@ -650,14 +730,22 @@ def main():
         if args.json:
             print(json.dumps(plan, indent=2))
         else:
-            panel, tbl_ord, tbl_sch = render_arbitrage_plan(plan)
+            panel, tbl_ord, tbl_pnl, tbl_sch = render_arbitrage_plan(plan)
             console.print(panel)
             console.print(tbl_ord)
+            console.print(tbl_pnl)
             console.print(tbl_sch)
+
+            if plan.get("basis_is_blocked", False):
+                console.print(f"\n[bold red]⚠️ 拦截警报: 当前处于深度贴水状态 ({plan.get('basis_spread_pct', 0):+.4f}%)，建仓将直接承受基差亏损！[/bold red]")
+                console.print("[yellow]依据 Scheme D 准入铁律，严格禁止在负基差时开仓。如确认强行建仓，请使用 --force 参数。[/yellow]")
 
             if is_dry_run:
                 console.print("\n[bold yellow]💡 [DRY-RUN 演练模式] 未向交易所提交真实订单。如需实盘执行，请配置 API Wallet 并添加 --force 参数。[/bold yellow]")
             else:
+                if plan.get("basis_is_blocked", False) and not args.force:
+                    console.print("\n[bold red]❌ 已阻止向交易所提交实盘订单 (负基差拦截)。[/bold red]")
+                    return
                 console.print("\n[bold red]⚡ 正在向 Hyperliquid 提交实盘订单...[/bold red]")
                 exec_res = executor.execute_arbitrage_plan(plan, dry_run=False)
                 if exec_res.get("status") in ["SPOT_ORDER_PLACED", "SUCCESS"]:

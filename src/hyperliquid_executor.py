@@ -754,11 +754,44 @@ class HyperliquidExecutor:
         apr_pct = hourly_funding * 24.0 * 365.0 * 100.0
         effective_apr_pct = apr_pct * 0.90 # 0.90 Capital Efficiency
         spread_pct = ((target_perp_px - target_spot_px) / target_spot_px * 100.0) if target_spot_px > 0 else 0.0
+        basis_spread_usd = (target_perp_px - target_spot_px) * spot_qty
 
+        # Fee and Friction Calculations
         entry_fee_pct = order_plan["fee_summary"]["base_fee_pct"]
+        entry_fee_usd = order_plan["fee_summary"].get("total_fee_usd", spot_notional * (entry_fee_pct / 100.0))
         roundtrip_fee_pct = entry_fee_pct * 2.0
-        entry_payback_hrs = (entry_fee_pct / 100.0) / hourly_funding if hourly_funding > 0 else None
-        roundtrip_payback_hrs = (roundtrip_fee_pct / 100.0) / hourly_funding if hourly_funding > 0 else None
+        roundtrip_fee_usd = entry_fee_usd * 2.0
+
+        calc = FundingRateCalculator()
+
+        # Pure fee payback (without basis)
+        pure_entry_payback_hrs = calc.calculate_payback_hours(entry_fee_pct / 100.0, hourly_funding)
+        pure_roundtrip_payback_hrs = calc.calculate_payback_hours(roundtrip_fee_pct / 100.0, hourly_funding)
+
+        # Net friction accounting for basis
+        net_entry_friction_pct = entry_fee_pct - spread_pct
+        net_entry_friction_usd = entry_fee_usd - basis_spread_usd
+        net_roundtrip_friction_pct = roundtrip_fee_pct - spread_pct
+        net_roundtrip_friction_usd = roundtrip_fee_usd - basis_spread_usd
+
+        # Net payback with basis
+        net_entry_payback_hrs = calc.calculate_net_payback_hours(entry_fee_pct / 100.0, spread_pct / 100.0, hourly_funding)
+        net_roundtrip_payback_hrs = calc.calculate_net_payback_hours(roundtrip_fee_pct / 100.0, spread_pct / 100.0, hourly_funding)
+
+        # Basis Risk Classification
+        basis_eval = FundingRateCalculator.classify_basis_spread(spread_pct)
+
+        # Multi-horizon Net APR Analysis
+        apr_30d = FundingRateCalculator.calculate_multi_horizon_apr(effective_apr_pct, spread_pct, roundtrip_fee_pct, days=30)
+        pnl_30d_usd = (total_capital_required * (apr_30d / 100.0)) * (30.0 / 365.0)
+
+        apr_90d = FundingRateCalculator.calculate_multi_horizon_apr(effective_apr_pct, spread_pct, roundtrip_fee_pct, days=90)
+        pnl_90d_usd = (total_capital_required * (apr_90d / 100.0)) * (90.0 / 365.0)
+
+        apr_365d = FundingRateCalculator.calculate_multi_horizon_apr(effective_apr_pct, spread_pct, roundtrip_fee_pct, days=365)
+        pnl_365d_usd = total_capital_required * (apr_365d / 100.0)
+
+        annual_funding_usd = total_capital_required * (effective_apr_pct / 100.0)
 
         return {
             "coin": coin,
@@ -774,13 +807,43 @@ class HyperliquidExecutor:
             "spot_notional_usd": spot_notional,
             "perp_notional_usd": perp_short_notional,
             "basis_spread_pct": spread_pct,
+            "basis_spread_usd": basis_spread_usd,
+            "basis_status": basis_eval["status"],
+            "basis_status_label": basis_eval["label"],
+            "basis_badge": basis_eval["badge"],
+            "basis_plain_badge": basis_eval["plain_badge"],
+            "basis_risk_note": basis_eval["note"],
+            "basis_risk_level": basis_eval["risk_level"],
+            "basis_is_blocked": basis_eval["is_blocked"],
             "hourly_funding": hourly_funding,
             "apr_pct": apr_pct,
             "effective_apr_pct": effective_apr_pct,
-            "entry_payback_hrs": entry_payback_hrs,
-            "entry_payback_str": FundingRateCalculator.format_hours(entry_payback_hrs),
-            "roundtrip_payback_hrs": roundtrip_payback_hrs,
-            "roundtrip_payback_str": FundingRateCalculator.format_hours(roundtrip_payback_hrs),
+            "annual_funding_usd": annual_funding_usd,
+            "entry_fee_pct": entry_fee_pct,
+            "entry_fee_usd": entry_fee_usd,
+            "roundtrip_fee_pct": roundtrip_fee_pct,
+            "roundtrip_fee_usd": roundtrip_fee_usd,
+            "net_entry_friction_pct": net_entry_friction_pct,
+            "net_entry_friction_usd": net_entry_friction_usd,
+            "net_roundtrip_friction_pct": net_roundtrip_friction_pct,
+            "net_roundtrip_friction_usd": net_roundtrip_friction_usd,
+            "pure_entry_payback_hrs": pure_entry_payback_hrs,
+            "pure_entry_payback_str": FundingRateCalculator.format_hours(pure_entry_payback_hrs),
+            "pure_roundtrip_payback_hrs": pure_roundtrip_payback_hrs,
+            "pure_roundtrip_payback_str": FundingRateCalculator.format_hours(pure_roundtrip_payback_hrs),
+            "net_entry_payback_hrs": net_entry_payback_hrs,
+            "net_entry_payback_str": FundingRateCalculator.format_hours(net_entry_payback_hrs),
+            "net_roundtrip_payback_hrs": net_roundtrip_payback_hrs,
+            "net_roundtrip_payback_str": FundingRateCalculator.format_hours(net_roundtrip_payback_hrs),
+            "entry_payback_hrs": net_entry_payback_hrs,
+            "entry_payback_str": FundingRateCalculator.format_hours(net_entry_payback_hrs),
+            "roundtrip_payback_hrs": net_roundtrip_payback_hrs,
+            "roundtrip_payback_str": FundingRateCalculator.format_hours(net_roundtrip_payback_hrs),
+            "multi_horizon_analysis": {
+                "30d": {"days": 30, "net_apr_pct": apr_30d, "net_pnl_usd": pnl_30d_usd},
+                "90d": {"days": 90, "net_apr_pct": apr_90d, "net_pnl_usd": pnl_90d_usd},
+                "365d": {"days": 365, "net_apr_pct": apr_365d, "net_pnl_usd": pnl_365d_usd},
+            },
             "scheme_d": {
                 "total_capital_required_usd": total_capital_required,
                 "spot_allocation_usd": spot_notional,

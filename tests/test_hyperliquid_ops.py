@@ -300,6 +300,36 @@ class TestHyperliquidExecutor(unittest.TestCase):
         self.assertAlmostEqual(plan["scheme_d"]["collateral_ltv_pct"], 65.0)
         self.assertGreater(plan["scheme_d"]["total_capital_required_usd"], 80.0)
         self.assertAlmostEqual(plan["scheme_d"]["theoretical_liq_price"], 80.0 / 0.342, places=2)
+        # Basis and PnL fields
+        self.assertIn("basis_spread_pct", plan)
+        self.assertIn("basis_status", plan)
+        self.assertIn("net_entry_payback_str", plan)
+        self.assertIn("net_roundtrip_payback_str", plan)
+        self.assertIn("multi_horizon_analysis", plan)
+        self.assertIn("30d", plan["multi_horizon_analysis"])
+
+    def test_render_arbitrage_plan(self):
+        from scripts.hl_ops import render_arbitrage_plan
+        self.mock_client.get_perp_market_data.return_value = (
+            [{"name": "HYPE", "szDecimals": 2}],
+            [{"funding": "0.0001", "midPx": "80.0", "markPx": "80.0"}]
+        )
+        self.mock_client.get_spot_market_data.return_value = (
+            [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150, "szDecimals": 2}],
+            [{"tokens": [150, 0], "name": "@107", "index": 107}],
+            [{"midPx": "80.0", "markPx": "80.0", "coin": "@107"}]
+        )
+        self.mock_client.get_l2_book.side_effect = lambda c: {
+            "levels": [[{"px": "80.0", "sz": "100.0"}], [{"px": "80.1", "sz": "100.0"}]]
+        }
+        plan = self.executor.build_arbitrage_plan(coin="HYPE", amount_qty=1.0, execution_mode="taker_taker")
+        res = render_arbitrage_plan(plan)
+        self.assertEqual(len(res), 4)
+        panel, tbl_ord, tbl_pnl, tbl_sch = res
+        self.assertIsNotNone(panel)
+        self.assertIsNotNone(tbl_ord)
+        self.assertIsNotNone(tbl_pnl)
+        self.assertIsNotNone(tbl_sch)
 
 
 if __name__ == "__main__":

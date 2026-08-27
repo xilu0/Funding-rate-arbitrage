@@ -244,11 +244,92 @@ class FundingRateCalculator:
             return None
         return fee_rate / hourly_rate
 
+    def calculate_net_payback_hours(self, fee_rate: float, basis_spread: float, hourly_rate: float) -> Optional[float]:
+        """
+        Calculates net time in hours for funding rate earnings to cover net frictions (fees minus basis profit).
+        - If basis is positive (contango), basis profit offsets fees, reducing payback time.
+        - If basis profit >= fees, net payback is 0.0h (instant payback upon fill).
+        - If basis is negative (backwardation), basis loss adds to fee friction, extending payback time.
+        Returns None if hourly funding rate is <= 0.
+        """
+        if hourly_rate <= 0:
+            return None
+        net_friction = fee_rate - basis_spread
+        if net_friction <= 0:
+            return 0.0
+        return net_friction / hourly_rate
+
+    @staticmethod
+    def calculate_multi_horizon_apr(base_apr: float, basis_spread_pct: float, roundtrip_fee_pct: float, days: int = 30) -> float:
+        """
+        Calculates annualized net realized return (Net Realized APR) accounting for one-time basis spread
+        and roundtrip fee friction amortized over a specific holding horizon (in days).
+        Formula:
+            Net APR = Base Funding APR + (Basis Spread % * 365 / days) - (Roundtrip Fee % * 365 / days)
+        """
+        if days <= 0:
+            return base_apr
+        annualized_basis_pct = basis_spread_pct * (365.0 / days)
+        annualized_fee_pct = roundtrip_fee_pct * (365.0 / days)
+        return base_apr + annualized_basis_pct - annualized_fee_pct
+
+    @staticmethod
+    def classify_basis_spread(spread_pct: float) -> Dict[str, Any]:
+        """
+        Classifies basis spread into risk & market condition tiers for delta-neutral spot-perp arbitrage:
+        - CONTANGO_BONUS (>= +0.05%): Positive basis locks in extra arbitrage profit, reducing payback.
+        - FAIR_SPREAD (0.00% to +0.05%): Fair parity spread, satisfies standard entry conditions.
+        - DRAG_WARNING (-0.05% to 0.00%): Slight discount adds friction and extends payback.
+        - SEVERE_BACKWARDATION (< -0.05%): Severe discount blocks entry under Scheme D rules.
+        """
+        if spread_pct >= 0.05:
+            return {
+                "status": "CONTANGO_BONUS",
+                "label": "升水红利 (Contango Bonus)",
+                "badge": "[bold green]🟢 [升水增益][/bold green]",
+                "plain_badge": "[升水增益]",
+                "note": "正基差升水结构，开仓即锁定额外基差收益，大幅降低进场摩擦",
+                "risk_level": "EXCELLENT",
+                "is_blocked": False
+            }
+        elif spread_pct >= 0.0:
+            return {
+                "status": "FAIR_SPREAD",
+                "label": "基差平价 (Fair Spread)",
+                "badge": "[bold green]🟢 [基差平价][/bold green]",
+                "plain_badge": "[基差平价]",
+                "note": "基差处于合理平价区间，满足标准建仓准入条件",
+                "risk_level": "NORMAL",
+                "is_blocked": False
+            }
+        elif spread_pct >= -0.05:
+            return {
+                "status": "DRAG_WARNING",
+                "label": "轻微贴水 (Drag Warning)",
+                "badge": "[bold yellow]🟡 [轻度贴水][/bold yellow]",
+                "plain_badge": "[轻度贴水]",
+                "note": "存在轻微贴水摩擦，回本时间略有延长，建议关注基差收敛",
+                "risk_level": "WARNING",
+                "is_blocked": False
+            }
+        else:
+            return {
+                "status": "SEVERE_BACKWARDATION",
+                "label": "严重贴水 (Severe Backwardation)",
+                "badge": "[bold red]🔴 [严重贴水][/bold red]",
+                "plain_badge": "[严重贴水]",
+                "note": "严重负基差（贴水），建仓即承受确定性亏损摩擦，违反 Scheme D 准入铁律",
+                "risk_level": "DANGER",
+                "is_blocked": True
+            }
+
     @staticmethod
     def format_hours(hours: Optional[float]) -> str:
         """Formats hours into a human-readable string (e.g. '5.2h', '3.1d', 'N/A')."""
         if hours is None or math.isinf(hours) or math.isnan(hours):
             return "N/A"
+        if hours <= 0:
+            return "0.0h (即时回本)"
         if hours < 1:
             mins = hours * 60
             return f"{mins:.1f} min"

@@ -34,6 +34,19 @@ description: >-
 $$1.00 - 0.315 \cdot \frac{P}{P_0} \le 0.027 \cdot \frac{P}{P_0}$$
 $$0.342 \cdot \frac{P}{P_0} \ge 1.00 \implies P_{\text{liq}} = \frac{P_0}{0.342} \approx \mathbf{2.924 \cdot P_0} \quad (\mathbf{+192.4\%})$$
 
+### 1.3 基差与真实净回本周期模型 (Basis & Net Payback)
+在现货做多 + 合约做空中，建仓基差 $\text{Spread} = \frac{P_{\text{perp}} - P_{\text{spot}}}{P_{\text{spot}}} \times 100\%$ 直接影响建仓摩擦：
+- **净进场摩擦**：$\text{Net Entry Friction} = \text{Entry Fee Rate} - \text{Basis Spread}$
+- **净双边摩擦**：$\text{Net Roundtrip Friction} = \text{Roundtrip Fee Rate} - \text{Basis Spread}$
+- **真实净回本周期**：
+  $$\text{Net Payback Hours} = \begin{cases} 0.0\text{h} \quad (\text{开仓即回本}), & \text{if } \text{Net Friction} \le 0 \\ \frac{\text{Net Friction}}{\text{Hourly Funding Rate}}, & \text{if } \text{Net Friction} > 0 \end{cases}$$
+
+### 1.4 多持有期综合净实际年化 (Multi-Horizon Net Realized APR)
+基差收益与手续费摩擦在开平仓时固定发生，年化收益随持有天数 $T_{\text{days}}$ 摊薄：
+$$\text{Annualized Basis Yield}(T) = \text{Basis Spread \%} \times \frac{365}{T_{\text{days}}}$$
+$$\text{Annualized Fee Friction}(T) = \text{Roundtrip Fee Rate \%} \times \frac{365}{T_{\text{days}}}$$
+$$\text{Net Realized APR}(T) = \text{Scheme D Funding APR} + \text{Annualized Basis Yield}(T) - \text{Annualized Fee Friction}(T)$$
+
 ---
 
 ## 2. 标准入场与建仓流程 (SOP)
@@ -45,9 +58,11 @@ $$0.342 \cdot \frac{P}{P_0} \ge 1.00 \implies P_{\text{liq}} = \frac{P_0}{0.342}
 1. **费率门槛**：
    - 7 天移动平均资金费率 $\ge 20\%$ Simple APR。
    - 进出场双边手续费回本周期（Payback Hours）$\le 48$ 小时。
-2. **基差保护 (Basis Spread Guard)**：
-   - $\text{Spread} = \frac{P_{\text{perp}} - P_{\text{spot}}}{P_{\text{spot}}} \ge 0.0\%$。
-   - **严格禁止在负基差（合约折价）时建仓**，防止建仓即遭受基差亏损。
+2. **基差状态分级与准入铁律 (Basis Spread Guard)**：
+   - $\text{Spread} \ge +0.05\%$：🟢 `[Contango Bonus 升水红利]`，增厚年化，缩短回本。
+   - $0.00\% \le \text{Spread} < +0.05\%$：🟢 `[Fair Spread 基差平价]`，满足标准建仓准入。
+   - $-0.05\% \le \text{Spread} < 0.00\%$：🟡 `[Drag Warning 轻微贴水]`，回本时间延长，警示关注。
+   - $\text{Spread} < -0.05\%$：🔴 `[Severe Backwardation 严重贴水]`，**严格禁止建仓**（阻止提交实盘订单，建仓即承受确定性亏损）。
 3. **订单簿深度评估**：
    - 检查 L2 盘口，单次建仓规模产生的综合滑点必须 $\le 0.15\%$。
 

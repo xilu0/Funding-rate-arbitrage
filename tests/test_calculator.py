@@ -30,12 +30,56 @@ class TestFundingRateCalculator(unittest.TestCase):
         rt_hrs = self.calc.calculate_payback_hours(self.calc.roundtrip_fee_rate, 0.0001)
         self.assertAlmostEqual(rt_hrs, 21.0)
 
+    def test_net_payback_hours_with_basis(self):
+        # Entry fee: 0.00105 (0.105%), hourly funding: 0.0001 (0.01%/h)
+        # Case 1: Positive basis +0.0005 (0.05%) -> net friction 0.00055 -> payback 5.5h
+        net_hrs = self.calc.calculate_net_payback_hours(0.00105, 0.0005, 0.0001)
+        self.assertAlmostEqual(net_hrs, 5.5)
+
+        # Case 2: Basis >= Fee -> instant payback 0.0h
+        instant_hrs = self.calc.calculate_net_payback_hours(0.00105, 0.0015, 0.0001)
+        self.assertEqual(instant_hrs, 0.0)
+        self.assertEqual(FundingRateCalculator.format_hours(instant_hrs), "0.0h (即时回本)")
+
+        # Case 3: Negative basis -0.0005 (-0.05%) -> net friction 0.00155 -> payback 15.5h
+        drag_hrs = self.calc.calculate_net_payback_hours(0.00105, -0.0005, 0.0001)
+        self.assertAlmostEqual(drag_hrs, 15.5)
+
+    def test_multi_horizon_apr(self):
+        # Base funding APR: 10.0%, Basis: +0.02%, Roundtrip fee: 0.20%
+        # 30D: 10.0 + (0.02 * 365 / 30) - (0.20 * 365 / 30) = 10.0 + 0.2433 - 2.4333 = 7.81%
+        apr_30d = FundingRateCalculator.calculate_multi_horizon_apr(10.0, 0.02, 0.20, days=30)
+        self.assertAlmostEqual(apr_30d, 10.0 + (0.02 - 0.20) * 365.0 / 30.0)
+
+        # 365D: 10.0 + 0.02 - 0.20 = 9.82%
+        apr_365d = FundingRateCalculator.calculate_multi_horizon_apr(10.0, 0.02, 0.20, days=365)
+        self.assertAlmostEqual(apr_365d, 9.82)
+
+    def test_classify_basis_spread(self):
+        c1 = FundingRateCalculator.classify_basis_spread(0.08)
+        self.assertEqual(c1["status"], "CONTANGO_BONUS")
+        self.assertFalse(c1["is_blocked"])
+
+        c2 = FundingRateCalculator.classify_basis_spread(0.02)
+        self.assertEqual(c2["status"], "FAIR_SPREAD")
+        self.assertFalse(c2["is_blocked"])
+
+        c3 = FundingRateCalculator.classify_basis_spread(-0.02)
+        self.assertEqual(c3["status"], "DRAG_WARNING")
+        self.assertFalse(c3["is_blocked"])
+
+        c4 = FundingRateCalculator.classify_basis_spread(-0.15)
+        self.assertEqual(c4["status"], "SEVERE_BACKWARDATION")
+        self.assertTrue(c4["is_blocked"])
+
     def test_negative_or_zero_funding_payback(self):
         self.assertIsNone(self.calc.calculate_payback_hours(self.calc.entry_fee_rate, 0.0))
         self.assertIsNone(self.calc.calculate_payback_hours(self.calc.entry_fee_rate, -0.0001))
+        self.assertIsNone(self.calc.calculate_net_payback_hours(self.calc.entry_fee_rate, 0.0001, 0.0))
 
     def test_format_hours(self):
         self.assertEqual(FundingRateCalculator.format_hours(None), "N/A")
+        self.assertEqual(FundingRateCalculator.format_hours(0.0), "0.0h (即时回本)")
         self.assertEqual(FundingRateCalculator.format_hours(0.5), "30.0 min")
         self.assertEqual(FundingRateCalculator.format_hours(10.5), "10.5 hrs")
         self.assertEqual(FundingRateCalculator.format_hours(72.0), "3.0 days")

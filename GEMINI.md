@@ -16,7 +16,8 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
   - Historical funding rate stability metrics & negative funding penalty.
   - L2 orderbook depth capacity & estimated market impact / slippage.
 - **`src/bybit_executor.py`**: Delta-neutral arbitrage builder with quantitative risk guards (slippage cap, payback cap, spread cap) and dry-run safety simulation.
-- **`src/storage.py`**: SQLite-based local storage manager with high-water mark incremental synchronization and offline caching for funding rate history.
+- **`src/telegram_notifier.py`**: Client for Telegram Bot API notifications with HTTP/SOCKS5 proxy support, Markdown formatting, and entity parsing fallback.
+- **`src/telegram_alert_monitor.py`**: Quantitative background monitor auditing basis spread and funding rates, evaluating separated reference triggers, and dispatching actionable alerts.
 - **`src/version.py`**: Version management and runtime environment diagnostics (Python, Gopass, dependencies, virtualenv status).
 - **`server.py`**: Lightweight REST API server built with Python standard library `http.server`, serving `/api/funding-rates`, `/api/funding-history` (Hyperliquid & Bybit), `/api/storage/summary`, `/api/depth-capacity`, `/api/bybit/build-arbitrage`, and static web assets.
 - **`scripts/hl_ops.py`**: Production CLI tool for Hyperliquid API Wallet diagnostics, portfolio health monitoring, emergency panic cancel, USD transfers, and deleveraging.

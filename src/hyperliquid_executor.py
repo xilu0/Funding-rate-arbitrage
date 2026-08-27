@@ -1,5 +1,6 @@
 import time
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple, Optional
 import src.env
 from src.hyperliquid_client import HyperliquidClient
@@ -910,4 +911,133 @@ class HyperliquidExecutor:
                 "coin": coin,
                 "error": str(e)
             }
+
+    def execute_dual_ioc_arbitrage(
+        self,
+        coin: str,
+        spot_pair: str,
+        qty: float,
+        spot_price: float,
+        perp_price: float,
+        max_slippage_pct: float = 0.30,
+        dry_run: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Executes simultaneous Dual-IOC Taker-Taker arbitrage orders on Hyperliquid:
+        - Leg 1: Spot Buy IOC (limit price = spot_price * (1 + max_slippage_pct/100))
+        - Leg 2: Perp Sell IOC (limit price = perp_price * (1 - max_slippage_pct/100))
+        - Returns execution status, executed fill prices, actual locked basis, latency, and fills.
+        """
+        start_t = time.time()
+        slippage_mult = max_slippage_pct / 100.0
+        spot_limit_px = round(spot_price * (1.0 + slippage_mult), 5)
+        perp_limit_px = round(perp_price * (1.0 - slippage_mult), 5)
+        target_spread_pct = (perp_price - spot_price) / spot_price * 100.0 if spot_price > 0 else 0.0
+
+        if dry_run or not getattr(self, "_sdk_available", False) or not self.agent_private_key:
+            simulated_notional_usd = qty * spot_price
+            return {
+                "status": "SIMULATED_SUCCESS",
+                "dry_run": True,
+                "coin": coin,
+                "spot_pair": spot_pair,
+                "qty": qty,
+                "target_spot_px": spot_price,
+                "target_perp_px": perp_price,
+                "spot_limit_px": spot_limit_px,
+                "perp_limit_px": perp_limit_px,
+                "target_spread_pct": target_spread_pct,
+                "exec_spread_pct": target_spread_pct,
+                "notional_usd": simulated_notional_usd,
+                "latency_ms": 1,
+                "spot_filled": {"avgPx": spot_price, "totalSz": qty, "oid": 9999901},
+                "perp_filled": {"avgPx": perp_price, "totalSz": qty, "oid": 9999902},
+                "message": "Dual-IOC dry-run simulation successfully completed (no live orders submitted)."
+            }
+
+        try:
+            account = self.Account.from_key(self.agent_private_key)
+            exchange = self.Exchange(account, self.base_url, account_address=self.account_address)
+
+            def place_spot():
+                return exchange.order(
+                    name=spot_pair,
+                    is_buy=True,
+                    sz=qty,
+                    limit_px=spot_limit_px,
+                    order_type={"limit": {"tif": "Ioc"}},
+                    reduce_only=False
+                )
+
+            def place_perp():
+                return exchange.order(
+                    name=coin,
+                    is_buy=False,
+                    sz=qty,
+                    limit_px=perp_limit_px,
+                    order_type={"limit": {"tif": "Ioc"}},
+                    reduce_only=False
+                )
+
+            # Concurrent Dual-IOC submission
+            with ThreadPoolExecutor(max_workers=2) as tpe:
+                f_spot = tpe.submit(place_spot)
+                f_perp = tpe.submit(place_perp)
+                spot_res = f_spot.result()
+                perp_res = f_perp.result()
+
+            latency_ms = int((time.time() - start_t) * 1000)
+
+            def parse_order_status(res: Any) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+                if isinstance(res, dict) and res.get("status") == "ok":
+                    statuses = res.get("response", {}).get("data", {}).get("statuses", [])
+                    if statuses:
+                        s0 = statuses[0]
+                        if "filled" in s0:
+                            return True, s0["filled"], None
+                        elif "resting" in s0:
+                            return True, s0["resting"], None
+                        elif "error" in s0:
+                            return False, None, s0["error"]
+                err = res.get("response") if isinstance(res, dict) else str(res)
+                return False, None, str(err)
+
+            spot_ok, spot_fill, spot_err = parse_order_status(spot_res)
+            perp_ok, perp_fill, perp_err = parse_order_status(perp_res)
+
+            is_success = spot_ok and perp_ok
+            exec_spot_px = float(spot_fill.get("avgPx", spot_price)) if spot_fill else spot_price
+            exec_perp_px = float(perp_fill.get("avgPx", perp_price)) if perp_fill else perp_price
+            actual_spread_pct = (exec_perp_px - exec_spot_px) / exec_spot_px * 100.0 if exec_spot_px > 0 else 0.0
+
+            return {
+                "status": "SUCCESS" if is_success else "PARTIAL_OR_FAILED",
+                "dry_run": False,
+                "coin": coin,
+                "spot_pair": spot_pair,
+                "qty": qty,
+                "latency_ms": latency_ms,
+                "target_spot_px": spot_price,
+                "target_perp_px": perp_price,
+                "exec_spot_px": exec_spot_px,
+                "exec_perp_px": exec_perp_px,
+                "target_spread_pct": target_spread_pct,
+                "exec_spread_pct": actual_spread_pct,
+                "spot_filled": spot_fill,
+                "perp_filled": perp_fill,
+                "spot_error": spot_err,
+                "perp_error": perp_err,
+                "spot_raw_response": spot_res,
+                "perp_raw_response": perp_res,
+                "message": "Dual-IOC arbitrage executed successfully." if is_success else f"Dual-IOC execution incomplete: spot_err={spot_err}, perp_err={perp_err}"
+            }
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "dry_run": False,
+                "coin": coin,
+                "error": str(e),
+                "latency_ms": int((time.time() - start_t) * 1000)
+            }
+
 

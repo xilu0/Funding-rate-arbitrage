@@ -11,6 +11,8 @@ from src.bybit_client import BybitClient
 from src.calculator import FundingRateCalculator
 from src.telegram_notifier import TelegramNotifier
 from src.hyperliquid_ws import HyperliquidWsFeed
+from src.auto_arbitrage_engine import AutoArbitrageEngine
+from src.basis_auditor import BasisAuditor
 
 logger = logging.getLogger("arbitrage_alert_monitor")
 
@@ -38,6 +40,8 @@ class ArbitrageAlertMonitor:
         poll_interval: Optional[float] = None,
         ws_feed: Optional[HyperliquidWsFeed] = None,
         on_arbitrage_callback: Optional[Callable[[Dict[str, Any], str], None]] = None,
+        auto_engine: Optional[AutoArbitrageEngine] = None,
+        only_reliable: Optional[bool] = None,
     ):
         self.hl_client = hl_client or HyperliquidClient()
         self.bybit_client = bybit_client or BybitClient()
@@ -129,6 +133,18 @@ class ArbitrageAlertMonitor:
             self.ws_feed.add_listener(self._on_ws_market_update)
 
         self.on_arbitrage_callback = on_arbitrage_callback
+        self.auto_engine = auto_engine
+
+        if only_reliable is not None:
+            self.only_reliable = only_reliable
+        else:
+            env_or = os.getenv("TELEGRAM_ALERT_ONLY_RELIABLE", "true").strip().lower()
+            self.only_reliable = env_or in ["true", "1", "yes", "on"]
+
+        self.auditor = getattr(auto_engine, "auditor", None) or BasisAuditor(
+            min_spread_pct=self.min_spread_pct,
+            min_apr_pct=self.min_apr_pct
+        )
 
     def is_enabled(self) -> bool:
         """Returns True if alert monitoring is enabled and Telegram credentials exist."""
@@ -194,10 +210,44 @@ class ArbitrageAlertMonitor:
             "source": "websocket"
         }
 
-        # Check conditions
+        # Record into BasisAuditor
+        spot_px = float(metric.get("spot_price") or 0.0)
+        perp_px = float(metric.get("perp_price") or 0.0)
+        spread_pct = float(metric.get("spread_pct") or 0.0)
+        apr_pct = float(metric.get("apr_pct") or 0.0)
+        if hasattr(self, "auditor") and self.auditor:
+            self.auditor.record_tick(coin, spot_px, perp_px, spread_pct, apr_pct, now=now)
+
+        # Strategy 2: Automated Basis-Sniping execution hook (independent from human alert cooldown)
+        if getattr(self, "auto_engine", None):
+            try:
+                self.auto_engine.on_market_tick(metric)
+            except Exception as e:
+                logger.error(f"Error in auto_engine.on_market_tick: {e}", exc_info=True)
+
+        # Check conditions for human Telegram alert
         is_triggered, reasons, trigger_key = self.evaluate_conditions(metric)
         if not is_triggered:
             return
+
+        # Perform Reliable Basis Audit
+        audit_res = None
+        if hasattr(self, "auditor") and self.auditor:
+            audit_res = self.auditor.audit_basis(
+                coin=coin,
+                current_spread_pct=spread_pct,
+                current_apr_pct=apr_pct,
+                spot_price=spot_px,
+                spot_book=metric.get("spot_book"),
+                perp_book=metric.get("perp_book"),
+                now=now
+            )
+            # If user configured to ONLY alert on reliable structural basis, filter out micro-spikes
+            if self.only_reliable and not audit_res.get("is_reliable", False):
+                logger.debug(
+                    f"Telegram alert for {coin} skipped: only_reliable=True and grade={audit_res.get('grade')}"
+                )
+                return
 
         cooldown_key = f"{exchange}:{coin}:{trigger_key}"
         last_sent = self._last_alerts.get(cooldown_key, 0.0)
@@ -213,7 +263,7 @@ class ArbitrageAlertMonitor:
             except Exception as e:
                 logger.error(f"Error in on_arbitrage_callback: {e}", exc_info=True)
 
-        msg = self.format_alert_message(metric, reasons, trigger_key)
+        msg = self.format_alert_message(metric, reasons, trigger_key, audit_result=audit_res)
         success, err_or_msg = self.notifier.send_message(msg)
 
         alert_record = {
@@ -226,6 +276,7 @@ class ArbitrageAlertMonitor:
             "success": success,
             "response": err_or_msg,
             "source": "websocket",
+            "reliability_audit": audit_res,
             "metrics": {
                 "spot_price": metric.get("spot_price"),
                 "perp_price": metric.get("perp_price"),
@@ -334,7 +385,13 @@ class ArbitrageAlertMonitor:
         is_triggered = spread_triggered or funding_triggered
         return is_triggered, reasons, trigger_key
 
-    def format_alert_message(self, metric: Dict[str, Any], reasons: List[str], trigger_key: str) -> str:
+    def format_alert_message(
+        self,
+        metric: Dict[str, Any],
+        reasons: List[str],
+        trigger_key: str,
+        audit_result: Optional[Dict[str, Any]] = None
+    ) -> str:
         """
         Formats structured, quantitative Telegram alert notification with Markdown.
         Always displays current funding rate and basis spread regardless of trigger mode.
@@ -373,6 +430,23 @@ class ArbitrageAlertMonitor:
         spread_icon = "🟢" if spread_pct > 0 else "🔴"
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+        audit_section = ""
+        if audit_result:
+            score = audit_result.get("reliability_score", 0)
+            badge = audit_result.get("grade_badge", "")
+            metrics = audit_result.get("metrics", {})
+            dur = metrics.get("duration_seconds", 0)
+            p10 = metrics.get("p10_floor_pct", 0)
+            depth_m = metrics.get("depth_multiple", 1.0)
+            advice = audit_result.get("advice", "")
+            audit_section = (
+                f"💎 *基差稳健性审核 (Reliable Basis Audit)*:\n"
+                f"• 稳健评级: *`{score}/100`* ({badge})\n"
+                f"• 平台持续: `{dur:.1f}s` (最差底线: `{p10:+.3f}%`)\n"
+                f"• 盘口深度: `{depth_m:.1f}x` 买方挂单缓冲\n"
+                f"• 量化建议: _{advice}_\n\n"
+            )
+
         msg = (
             f"🚨 *【资金费率套利建仓提醒】*\n"
             f"🏛️ *交易所*: `{exchange}`\n"
@@ -387,6 +461,7 @@ class ArbitrageAlertMonitor:
             f"• 周期费率: `{hourly_funding_pct:+.5f}%` ({funding_interval_hr:.0f}h)\n"
             f"• 年化收益: Simple APR `{apr_pct:+.2f}%` | Compound APY `{apy_pct:+.2f}%`\n"
             f"• 预估回本: `{roundtrip_payback_str}`\n\n"
+            f"{audit_section}"
             f"💡 *量化分析*:\n"
             f"{analysis_note}\n\n"
             f"🛠️ *快速建仓指令 (默认 Taker-Taker 双边吃单)*:\n"
@@ -428,6 +503,26 @@ class ArbitrageAlertMonitor:
             if not is_triggered:
                 continue
 
+            # Audit basis
+            audit_res = None
+            if hasattr(self, "auditor") and self.auditor:
+                spot_px = float(m.get("spot_price") or 0.0)
+                perp_px = float(m.get("perp_price") or 0.0)
+                spread_pct = float(m.get("spread_pct") or 0.0)
+                apr_pct = float(m.get("apr_pct") or 0.0)
+                audit_res = self.auditor.audit_basis(
+                    coin=coin,
+                    current_spread_pct=spread_pct,
+                    current_apr_pct=apr_pct,
+                    spot_price=spot_px,
+                    now=now
+                )
+                if self.only_reliable and not audit_res.get("is_reliable", False):
+                    logger.debug(
+                        f"Poll alert for {coin} skipped: only_reliable=True and grade={audit_res.get('grade')}"
+                    )
+                    continue
+
             cooldown_key = f"{exchange}:{coin}:{trigger_key}"
             last_sent = self._last_alerts.get(cooldown_key, 0.0)
             cooldown_secs = self.cooldown_minutes * 60.0
@@ -436,7 +531,7 @@ class ArbitrageAlertMonitor:
                 logger.debug(f"Alert for {cooldown_key} in cooldown ({now - last_sent:.0f}s < {cooldown_secs:.0f}s).")
                 continue
 
-            msg = self.format_alert_message(m, reasons, trigger_key)
+            msg = self.format_alert_message(m, reasons, trigger_key, audit_result=audit_res)
             success, err_or_msg = self.notifier.send_message(msg)
 
             alert_record = {
@@ -479,6 +574,7 @@ class ArbitrageAlertMonitor:
             "symbols": self.symbols,
             "check_spread": self.check_spread,
             "min_spread_pct": self.min_spread_pct,
+            "only_reliable": self.only_reliable,
             "check_funding": self.check_funding,
             "min_apr_pct": self.min_apr_pct,
             "cooldown_minutes": self.cooldown_minutes,
@@ -489,4 +585,5 @@ class ArbitrageAlertMonitor:
             "ws_feed": self.ws_feed.get_health() if self.ws_feed else {"ws_connected": False, "enabled": False},
             "last_metrics": self._last_metrics,
             "recent_alerts": self._alert_history[-10:],
+            "auto_arbitrage": self.auto_engine.get_status() if self.auto_engine else None,
         }

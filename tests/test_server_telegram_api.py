@@ -84,5 +84,51 @@ class TestServerTelegramAPI(unittest.TestCase):
         output = json.loads(handler.wfile.getvalue().decode("utf-8"))
         self.assertEqual(output["status"], "error")
 
+    def test_handle_api_auto_arbitrage_status(self):
+        mock_auto_engine = MagicMock()
+        mock_auto_engine.get_status.return_value = {
+            "enabled": True,
+            "dry_run": True,
+            "min_spread_pct": 0.08,
+            "capital_policy": {"per_trade_usd": 500.0}
+        }
+        handler = ArbitrageServerHandler.__new__(ArbitrageServerHandler)
+        handler.auto_engine = mock_auto_engine
+        handler.wfile = DummyWFile()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        handler.handle_api_auto_arbitrage_status()
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["status"], "success")
+        self.assertTrue(output["data"]["enabled"])
+        self.assertEqual(output["data"]["min_spread_pct"], 0.08)
+
+    def test_handle_api_auto_arbitrage_config(self):
+        mock_auto_engine = MagicMock()
+        mock_auto_engine.update_config.return_value = {
+            "enabled": True,
+            "min_spread_pct": 0.12
+        }
+        handler = ArbitrageServerHandler.__new__(ArbitrageServerHandler)
+        handler.auto_engine = mock_auto_engine
+        body_bytes = b'{"enabled": true, "min_spread_pct": 0.12}'
+        handler.headers = {"Content-Length": str(len(body_bytes))}
+        handler.rfile = io.BytesIO(body_bytes)
+        handler.wfile = DummyWFile()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        handler.handle_api_auto_arbitrage_config()
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["status"], "success")
+        self.assertEqual(output["data"]["min_spread_pct"], 0.12)
+
 if __name__ == "__main__":
     unittest.main()

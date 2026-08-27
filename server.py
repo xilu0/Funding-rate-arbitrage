@@ -16,6 +16,8 @@ from src.calculator import (
 )
 from src.telegram_notifier import TelegramNotifier
 from src.telegram_alert_monitor import ArbitrageAlertMonitor
+from src.hyperliquid_executor import HyperliquidExecutor
+from src.auto_arbitrage_engine import AutoArbitrageEngine
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -25,6 +27,7 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
     calculator: FundingRateCalculator = None
     storage: FundingHistoryStorage = None
     alert_monitor: Optional[ArbitrageAlertMonitor] = None
+    auto_engine: Optional[AutoArbitrageEngine] = None
     cache: Dict[str, Any] = {}
 
     def __init__(self, *args, **kwargs):
@@ -58,6 +61,8 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.handle_api_telegram_status()
         elif path == "/api/telegram/test":
             self.handle_api_telegram_test()
+        elif path == "/api/auto-arbitrage/status":
+            self.handle_api_auto_arbitrage_status()
         else:
             # Fallback to serving static files from web/ directory
             super().do_GET()
@@ -67,6 +72,8 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
         path = parsed.path
         if path == "/api/telegram/test":
             self.handle_api_telegram_test()
+        elif path == "/api/auto-arbitrage/config":
+            self.handle_api_auto_arbitrage_config()
         else:
             self.send_error(404, "Not Found")
 
@@ -110,6 +117,46 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
                 "result": msg
             }
             status_code = 200 if success else 500
+
+        response_bytes = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(response_bytes)))
+        self.end_headers()
+        self.wfile.write(response_bytes)
+
+    def handle_api_auto_arbitrage_status(self):
+        if self.auto_engine:
+            status_data = self.auto_engine.get_status()
+        else:
+            status_data = {
+                "enabled": False,
+                "status": "not initialized"
+            }
+        payload = {"status": "success", "data": status_data}
+        response_bytes = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(response_bytes)))
+        self.end_headers()
+        self.wfile.write(response_bytes)
+
+    def handle_api_auto_arbitrage_config(self):
+        if not self.auto_engine:
+            payload = {"status": "error", "message": "AutoArbitrageEngine not initialized"}
+            status_code = 400
+        else:
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(content_len)) if content_len > 0 else {}
+                new_status = self.auto_engine.update_config(**body)
+                payload = {"status": "success", "data": new_status}
+                status_code = 200
+            except Exception as e:
+                payload = {"status": "error", "message": str(e)}
+                status_code = 400
 
         response_bytes = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(status_code)
@@ -736,11 +783,13 @@ def start_web_server(port: int,
                      bybit_client: BybitClient,
                      calculator: FundingRateCalculator, 
                      interval: int = 30,
-                     alert_monitor: Optional[ArbitrageAlertMonitor] = None):
+                     alert_monitor: Optional[ArbitrageAlertMonitor] = None,
+                     auto_engine: Optional[AutoArbitrageEngine] = None):
     ArbitrageServerHandler.hl_client = hl_client
     ArbitrageServerHandler.bybit_client = bybit_client
     ArbitrageServerHandler.calculator = calculator
     ArbitrageServerHandler.alert_monitor = alert_monitor
+    ArbitrageServerHandler.auto_engine = auto_engine
 
     if alert_monitor and alert_monitor.is_enabled():
         alert_monitor.start()
@@ -755,11 +804,23 @@ def start_web_server(port: int,
         print(f"🤖 Telegram 告警监听:  已启用 (标的: {', '.join(alert_monitor.symbols)} | 交易所: {alert_monitor.exchange})")
         ws_mode = "⚡ WebSocket 实时推流 (毫秒级响应 + 断线容灾)" if alert_monitor.ws_feed else f"🔄 REST 轮询 (间隔: {alert_monitor.poll_interval}s)"
         print(f"   ├─ 行情订阅模式: {ws_mode}")
+        print(f"   ├─ 告警过滤策略: {'💎 仅推送达标稳健基差 (杜绝短命假毛刺)' if alert_monitor.only_reliable else '⚠️ 允许未达标瞬态毛刺告警'}")
         print(f"   ├─ 参考基差: {'开启 (>= +' + str(alert_monitor.min_spread_pct) + '%)' if alert_monitor.check_spread else '关闭'}")
         print(f"   ├─ 参考费率: {'开启 (>= +' + str(alert_monitor.min_apr_pct) + '%)' if alert_monitor.check_funding else '关闭'}")
         print(f"   └─ 巡检间隔: {alert_monitor.poll_interval}s | 冷却时间: {alert_monitor.cooldown_minutes}m")
     else:
         print(f"🤖 Telegram 告警监听:  未启用 (如需启用请在 .env 中配置 TELEGRAM_ALERT_ENABLED=true 与 Token)")
+
+    if auto_engine and auto_engine.enabled:
+        mode_str = "🧪 模拟演练 (DRY-RUN)" if auto_engine.dry_run else "🚀 实盘自动执行 (LIVE)"
+        rb_str = f"💎 强制稳健审核 (R-Score >= {auto_engine.min_reliability_score:.0f})" if auto_engine.require_reliable_basis else "⚠️ 允许单Tick激进抢单"
+        print(f"⚡ 策略二 (自动抢基差): 已启用 [{mode_str}] (标的: {', '.join(auto_engine.symbols)})")
+        print(f"   ├─ 基差审核模式: {rb_str} (30s 滚动均值 + P10 底线支撑)")
+        print(f"   ├─ 触发基差阈值: >= +{auto_engine.min_spread_pct:.3f}% (防毛刺: 连续 {auto_engine.persistence_ticks} Ticks / {auto_engine.persistence_ms:.0f}ms)")
+        print(f"   ├─ 资金分配策略: 单笔 ${auto_engine.per_trade_usd:,.2f} | 累计上限 ${auto_engine.max_total_capital_usd:,.2f} | 缓冲底线 ${auto_engine.min_cash_reserve_usd:,.2f}")
+        print(f"   └─ 执行保护参数: Dual-IOC 双边吃单 (滑点上限: {auto_engine.max_slippage_pct}% | 冷却: {auto_engine.cooldown_seconds:.0f}s)")
+    else:
+        print(f"⚡ 策略二 (自动抢基差): 未启用 (可通过 .env 中 AUTO_ARBITRAGE_ENABLED=true 或 --auto-arbitrage 启用)")
     print(f"===========================================================")
 
     try:
@@ -789,6 +850,21 @@ def main():
     parser.add_argument("--alert-apr", type=float, default=None, help="Funding rate APR threshold percentage (e.g. 20.0 for 20%%)")
     parser.add_argument("--alert-interval", type=float, default=None, help="Alert monitor check interval in seconds (default: 30)")
     parser.add_argument("--alert-cooldown", type=float, default=None, help="Alert cooldown in minutes (default: 30)")
+
+    # Strategy 2: Auto-Arbitrage Engine CLI overrides
+    parser.add_argument("--auto-arbitrage", action="store_true", default=None, help="Force enable Strategy 2 auto-arbitrage engine")
+    parser.add_argument("--no-auto-arbitrage", action="store_true", default=False, help="Force disable Strategy 2 auto-arbitrage engine")
+    parser.add_argument("--auto-live", action="store_true", default=False, help="Enable LIVE real-money execution for auto-arbitrage (default: dry-run)")
+    parser.add_argument("--auto-dry-run", action="store_true", default=None, help="Force dry-run simulation mode for auto-arbitrage")
+    parser.add_argument("--auto-capital", type=float, default=None, help="Max total capital for auto-arbitrage in USD (default: 5000)")
+    parser.add_argument("--auto-per-trade", type=float, default=None, help="Capital per single trade tranche in USD (default: 500)")
+    parser.add_argument("--auto-reserve", type=float, default=None, help="Min cash reserve buffer in USD (default: 1000)")
+    parser.add_argument("--auto-min-spread", type=float, default=None, help="Min spread percentage to trigger auto-arbitrage (e.g. 0.08 for 0.08%%)")
+    parser.add_argument("--auto-reliable-only", action="store_true", default=None, help="Require Grade A Reliable Basis (R-Score >= 80) before auto-executing")
+    parser.add_argument("--auto-aggressive", action="store_true", default=False, help="Disable reliable basis auditor and aggressively snipe any tick spike")
+    parser.add_argument("--auto-min-score", type=float, default=None, help="Minimum reliability score threshold (default: 80.0)")
+    parser.add_argument("--alert-only-reliable", action="store_true", default=None, help="Only send Telegram alerts on Grade A Reliable Basis (default: true)")
+    parser.add_argument("--alert-all-spikes", action="store_true", default=False, help="Force disable reliable filter and alert on all spikes")
     args = parser.parse_args()
 
     hl_client = HyperliquidClient()
@@ -818,10 +894,54 @@ def main():
 
     alert_symbols = [s.strip() for s in args.alert_symbols.split(",")] if args.alert_symbols else None
 
+    # Resolve Strategy 2: Auto-Arbitrage Engine settings
+    auto_enabled_override = None
+    if args.no_auto_arbitrage:
+        auto_enabled_override = False
+    elif args.auto_arbitrage:
+        auto_enabled_override = True
+
+    auto_dry_run_override = None
+    if args.auto_live:
+        auto_dry_run_override = False
+    elif args.auto_dry_run:
+        auto_dry_run_override = True
+
+    require_reliable = None
+    if args.auto_aggressive:
+        require_reliable = False
+    elif args.auto_reliable_only:
+        require_reliable = True
+
+    executor = HyperliquidExecutor(hl_client=hl_client)
+    notifier = TelegramNotifier()
+
+    auto_engine = AutoArbitrageEngine(
+        executor=executor,
+        hl_client=hl_client,
+        notifier=notifier,
+        enabled=auto_enabled_override,
+        dry_run=auto_dry_run_override,
+        symbols=alert_symbols,
+        min_spread_pct=args.auto_min_spread,
+        max_total_capital_usd=args.auto_capital,
+        per_trade_usd=args.auto_per_trade,
+        min_cash_reserve_usd=args.auto_reserve,
+        require_reliable_basis=require_reliable,
+        min_reliability_score=args.auto_min_score
+    )
+
+    only_reliable_alert = None
+    if args.alert_all_spikes:
+        only_reliable_alert = False
+    elif args.alert_only_reliable:
+        only_reliable_alert = True
+
     alert_monitor = ArbitrageAlertMonitor(
         hl_client=hl_client,
         bybit_client=bybit_client,
         calculator=calculator,
+        notifier=notifier,
         enabled=enabled_override,
         exchange=args.alert_exchange,
         symbols=alert_symbols,
@@ -830,10 +950,20 @@ def main():
         check_funding=check_funding_override,
         min_apr_pct=args.alert_apr,
         cooldown_minutes=args.alert_cooldown,
-        poll_interval=args.alert_interval
+        poll_interval=args.alert_interval,
+        auto_engine=auto_engine,
+        only_reliable=only_reliable_alert
     )
 
-    start_web_server(args.port, hl_client, bybit_client, calculator, args.interval, alert_monitor=alert_monitor)
+    start_web_server(
+        args.port,
+        hl_client,
+        bybit_client,
+        calculator,
+        args.interval,
+        alert_monitor=alert_monitor,
+        auto_engine=auto_engine
+    )
 
 if __name__ == "__main__":
     main()

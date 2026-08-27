@@ -194,7 +194,8 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
             symbols=["HYPER"],  # Matches HYPE automatically
             min_spread_pct=0.10,
             min_apr_pct=20.0,
-            cooldown_minutes=30.0
+            cooldown_minutes=30.0,
+            only_reliable=False
         )
 
         # 1. First poll: should dispatch alert
@@ -239,7 +240,8 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
             notifier=self.mock_notifier,
             symbols=["HYPER"],
             min_spread_pct=0.10,
-            min_apr_pct=20.0
+            min_apr_pct=20.0,
+            only_reliable=False
         )
         ws_metric = {
             "exchange": "Hyperliquid",
@@ -257,6 +259,30 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
         self.assertEqual(self.mock_notifier.send_message.call_count, 1)
         self.assertEqual(monitor._total_alerts_sent, 1)
 
+    def test_ws_market_update_only_reliable_blocks_transient_spike(self):
+        """Verifies that when only_reliable=True, a transient spike is filtered and not alerted."""
+        monitor = ArbitrageAlertMonitor(
+            notifier=self.mock_notifier,
+            symbols=["HYPER"],
+            min_spread_pct=0.10,
+            min_apr_pct=20.0,
+            only_reliable=True
+        )
+        ws_metric = {
+            "exchange": "Hyperliquid",
+            "coin": "HYPE",
+            "spot_pair": "HYPE/USDC",
+            "spot_price": 82.00,
+            "perp_price": 82.164,
+            "spread_pct": 0.20,
+            "hourly_funding_pct": 0.00125,
+            "apr_pct": 8.0,  # low funding, 0s duration -> Grade C
+            "source": "websocket"
+        }
+        monitor._on_ws_market_update(ws_metric)
+        self.assertEqual(self.mock_notifier.send_message.call_count, 0)
+        self.assertEqual(monitor._total_alerts_sent, 0)
+
     def test_ws_market_update_calls_automated_callback(self):
         """Verifies that on_arbitrage_callback hook is invoked for automated trade execution."""
         auto_callback = MagicMock()
@@ -264,7 +290,8 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
             notifier=self.mock_notifier,
             symbols=["HYPER"],
             min_spread_pct=0.10,
-            on_arbitrage_callback=auto_callback
+            on_arbitrage_callback=auto_callback,
+            only_reliable=False
         )
         ws_metric = {
             "exchange": "Hyperliquid",

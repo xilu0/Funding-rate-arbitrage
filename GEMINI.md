@@ -19,6 +19,8 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
 - **`src/bybit_executor.py`**: Delta-neutral arbitrage builder with quantitative risk guards (slippage cap, payback cap, spread cap) and dry-run safety simulation.
 - **`src/telegram_notifier.py`**: Client for Telegram Bot API notifications with HTTP/SOCKS5 proxy support, Markdown formatting, and entity parsing fallback.
 - **`src/telegram_alert_monitor.py`**: Quantitative background monitor auditing basis spread and funding rates, evaluating separated reference triggers, and dispatching actionable alerts.
+- **`src/auto_arbitrage_engine.py`**: Strategy 2 automated basis-sniping engine with Scheme D dynamic capital sizing, anti-flicker persistence filtering, Dual-IOC taker execution, and Telegram reporting.
+- **`src/basis_auditor.py`**: Reliable Structural Basis Auditor certifying Volume-Weighted executable spread (VWAP), 30s rolling persistence, P10 lowest floor, depth multiples, and R-Score matrix.
 - **`src/version.py`**: Version management and runtime environment diagnostics (Python, Gopass, dependencies, virtualenv status).
 - **`server.py`**: Lightweight REST API server built with Python standard library `http.server`, serving `/api/funding-rates`, `/api/funding-history` (Hyperliquid & Bybit), `/api/storage/summary`, `/api/depth-capacity`, `/api/bybit/build-arbitrage`, and static web assets.
 - **`scripts/hl_ops.py`**: Production CLI tool for Hyperliquid API Wallet diagnostics, portfolio health monitoring, emergency panic cancel, USD transfers, and deleveraging.
@@ -48,9 +50,19 @@ python3 monitor.py --exchange all --limit 20
 python3 monitor.py --exchange bybit --live --interval 5
 ```
 
-### Running Web Server
+### Running Web Server (默认 Tmux 会话: capital-monitor)
+本项目默认在 tmux 会话 `capital-monitor` 中运行，严禁干扰 `cex-monitor`：
 ```bash
+# 1. 检查或进入本项目会话
+tmux attach -t capital-monitor
+
+# 2. 会话内启动服务 (加载 .env 配置与策略二)
 python3 server.py --port 8000
+
+# 3. 平滑重启本项目服务 (向 capital-monitor 发送重载)
+tmux send-keys -t capital-monitor C-c
+sleep 1
+tmux send-keys -t capital-monitor "python3 server.py --port 8000" C-m
 ```
 
 ### Hyperliquid API 运维与实盘操作 (需 Gopass 注入凭据)
@@ -131,6 +143,14 @@ gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE -
   - 账户资产与持仓（`clearinghouseState`、`openOrders`）**必须优先查询 `hl2` 内网端口**：`http://10.1.3.165:3001/info`（响应 1.2ms，提速 23 倍且免 Rate Limit）。
   - 必须配合同步滞后守卫（`SyncLag <= 2.0s`），异常时无感回退官方 `https://api.hyperliquid.xyz/info`。
 - **详细参考**：完整双机拓扑、报文契约、实测基准与 Runbook 参见 [`docs/hyperliquid_node_guide.md`](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/hyperliquid_node_guide.md)。
+
+### 3.8 Tmux 会话管理与隔离铁律 (Tmux Session Invariants)
+- **本项目默认会话 (`capital-monitor`)**：
+  - 本项目（`capital-rate-arbitrage`）的 REST API 服务（`server.py`）、WebSocket 监听、Telegram 告警监控以及策略二自动化引擎，**必须默认且只能运行在 `capital-monitor` tmux session 中**。
+  - 若需重载配置、重启服务或捕获控制台日志，必须唯一指定目标 `-t capital-monitor`。
+- **生产隔离禁区 (`cex-monitor`)**：
+  - 服务器上的 `cex-monitor` 会话承载着既有的生产交易监控，**严禁触碰、中断、重启或向其发送任何按键（`C-c` / `send-keys`）**。
+
 
 
 

@@ -75,6 +75,12 @@ gopass env trading/hyperliquid python3 scripts/hl_ops.py status
 
 # 3. 提交实盘对冲建仓 (Taker-Taker 双边吃单)
 gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --force
+
+# 4. 提交实盘对冲平仓 (Dual-IOC 双边变现)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py close --coin HYPE --qty 1 --force
+
+# 5. 查询单币实时行情、基差与收益率测算
+python3 scripts/hl_ops.py market --coin HYPE
 ```
 
 ---

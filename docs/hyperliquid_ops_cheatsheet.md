@@ -151,21 +151,53 @@ python3 scripts/hl_ops.py transfer --to perp --amount 1000 --dry-run
 python3 scripts/hl_ops.py deleverage --coin PURR --pct 25
 
 # Level 3: 紧急熔断 50% 头寸
-python3 scripts/hl_ops.py deleverage --coin PURR --pct 50 --force
+gopass env trading/hyperliquid python3 scripts/hl_ops.py deleverage --coin PURR --pct 50 --force
 ```
 
 #### 8. 套利建仓演练与实盘执行 (`arbitrage`)
-自动化构建 1:1 Delta 中性套利方案（现货质押 + 永续对冲），支持 Maker-Taker 极速对冲与风控矩阵计算。
+自动化构建 1:1 Delta 中性套利方案（现货质押 + 永续对冲），支持 Dual-IOC 极速对冲与风控矩阵计算。
 ```bash
 # 演练建仓 1 个 HYPE (默认 Dry-Run，输出完整盘口、订单与风控数据)
 python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1
 
-# 实盘执行 (使用 Gopass 内存注入私钥)
+# 实盘执行 1 个 HYPE (使用 Gopass 内存注入私钥)
 gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE --qty 1 --force
+
+# 按目标 USD 资金量建仓 (如 $1000 USD)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py arbitrage --coin HYPE --usd 1000 --force
 ```
 > 详见实操手册：[docs/hyperliquid_hype_delta_neutral_arbitrage.md](file:///home/dave/src/github/xiluo/capital-rate-arbitrage/docs/hyperliquid_hype_delta_neutral_arbitrage.md)
 
-#### 9. 版本与环境诊断 (`version`)
+#### 9. 双边市价平仓与变现 (`close` / `unwind`)
+双边市价平仓锁定套利利润或释放资金（合约平空 + 现货卖出变现 USDC）：
+```bash
+# 演练平仓 1 个 HYPE (Dry-Run 模式，检查可平仓位与预估成交价)
+python3 scripts/hl_ops.py close --coin HYPE --qty 1
+
+# 实盘平仓指定数量 (如平仓 1 个 HYPE)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py close --coin HYPE --qty 1 --force
+
+# 实盘按比例全平/清仓 (如 100% 全平)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py close --coin HYPE --pct 100 --force
+
+# 实盘部分平仓 (如平仓 50%)
+gopass env trading/hyperliquid python3 scripts/hl_ops.py close --coin HYPE --pct 50 --force
+```
+
+#### 10. 实时行情与基差费率查询 (`market` / `monitor.py`)
+快速查看指定币种的盘口价格、实时基差、年化 APR/APY 与进出场回本测算：
+```bash
+# 查询单币种（如 HYPE）的实时基差与费率大盘
+python3 scripts/hl_ops.py market --coin HYPE
+
+# 全市场实时扫描（按资金费率排序，查看前 10 个高收益标的）
+python3 monitor.py --exchange hyperliquid --limit 10
+
+# 终端持续刷新模式 (每 5 秒刷新一次)
+python3 monitor.py --exchange hyperliquid --live --interval 5
+```
+
+#### 11. 版本与环境诊断 (`version`)
 输出当前量化系统版本、Python 环境、Gopass 状态及依赖诊断。
 ```bash
 python3 scripts/hl_ops.py version

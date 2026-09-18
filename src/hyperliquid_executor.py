@@ -863,16 +863,42 @@ class HyperliquidExecutor:
             "order_plan": order_plan
         }
 
+    @staticmethod
+    def round_hl_price(px: float, sz_decimals: int = 2) -> float:
+        """Rounds price to Hyperliquid standard: at most 5 significant figures and at most (6 - sz_decimals) decimals."""
+        if px <= 0:
+            return px
+        max_decimals = max(0, 6 - sz_decimals)
+        val = float(f"{px:.5g}")
+        return round(val, max_decimals)
+
     def execute_arbitrage_plan(self, plan: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any]:
         """
         Executes a prepared Delta-Neutral arbitrage plan on Hyperliquid:
         - In Dry-Run (default): returns full execution simulation.
-        - In Live mode: Places Leg 1 Post-Only Spot Order and prepares Leg 2 Perp trigger.
+        - In Live mode:
+          - If taker_taker: Executes simultaneous Dual-IOC on Spot Ask and Perp Bid.
+          - If maker_taker: Places Leg 1 Post-Only Spot Order and prepares Leg 2 Perp trigger.
         """
         coin = plan.get("coin", "HYPE")
         spot_pair = plan.get("spot_pair", "@107")
+        execution_mode = plan.get("execution_mode", "taker_taker")
         spot_order = plan.get("order_plan", {}).get("spot_order", {})
         perp_order = plan.get("order_plan", {}).get("perp_order", {})
+
+        if execution_mode == "taker_taker":
+            qty = plan.get("spot_qty", 1.0)
+            target_spot_px = plan.get("target_spot_price", spot_order.get("limit_px", 0.0))
+            target_perp_px = plan.get("target_perp_price", perp_order.get("limit_px", 0.0))
+            return self.execute_dual_ioc_arbitrage(
+                coin=coin,
+                spot_pair=spot_pair,
+                qty=qty,
+                spot_price=target_spot_px,
+                perp_price=target_perp_px,
+                max_slippage_pct=0.30,
+                dry_run=dry_run
+            )
 
         if dry_run or not self._sdk_available:
             return {
@@ -930,8 +956,8 @@ class HyperliquidExecutor:
         """
         start_t = time.time()
         slippage_mult = max_slippage_pct / 100.0
-        spot_limit_px = round(spot_price * (1.0 + slippage_mult), 5)
-        perp_limit_px = round(perp_price * (1.0 - slippage_mult), 5)
+        spot_limit_px = self.round_hl_price(spot_price * (1.0 + slippage_mult))
+        perp_limit_px = self.round_hl_price(perp_price * (1.0 - slippage_mult))
         target_spread_pct = (perp_price - spot_price) / spot_price * 100.0 if spot_price > 0 else 0.0
 
         if dry_run or not getattr(self, "_sdk_available", False) or not self.agent_private_key:
@@ -979,15 +1005,6 @@ class HyperliquidExecutor:
                     reduce_only=False
                 )
 
-            # Concurrent Dual-IOC submission
-            with ThreadPoolExecutor(max_workers=2) as tpe:
-                f_spot = tpe.submit(place_spot)
-                f_perp = tpe.submit(place_perp)
-                spot_res = f_spot.result()
-                perp_res = f_perp.result()
-
-            latency_ms = int((time.time() - start_t) * 1000)
-
             def parse_order_status(res: Any) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
                 if isinstance(res, dict) and res.get("status") == "ok":
                     statuses = res.get("response", {}).get("data", {}).get("statuses", [])
@@ -1002,8 +1019,35 @@ class HyperliquidExecutor:
                 err = res.get("response") if isinstance(res, dict) else str(res)
                 return False, None, str(err)
 
+            # Step 1: Submit Spot Buy IOC first
+            spot_res = place_spot()
             spot_ok, spot_fill, spot_err = parse_order_status(spot_res)
-            perp_ok, perp_fill, perp_err = parse_order_status(perp_res)
+
+            filled_spot_sz = safe_float(spot_fill.get("totalSz", 0.0)) if spot_fill else 0.0
+
+            perp_res = None
+            perp_ok = False
+            perp_fill = None
+            perp_err = None
+
+            # Step 2: Only hedge perp if spot filled (eliminates naked short risk)
+            if spot_ok and filled_spot_sz > 0:
+                time.sleep(0.005) # 5ms guard ensures strictly increasing nonce on Hyperliquid L1
+                def place_perp_matched(sz: float):
+                    return exchange.order(
+                        name=coin,
+                        is_buy=False,
+                        sz=sz,
+                        limit_px=perp_limit_px,
+                        order_type={"limit": {"tif": "Ioc"}},
+                        reduce_only=False
+                    )
+                perp_res = place_perp_matched(filled_spot_sz)
+                perp_ok, perp_fill, perp_err = parse_order_status(perp_res)
+            elif not spot_ok:
+                perp_err = "SKIPPED_SPOT_NOT_FILLED"
+
+            latency_ms = int((time.time() - start_t) * 1000)
 
             is_success = spot_ok and perp_ok
             exec_spot_px = float(spot_fill.get("avgPx", spot_price)) if spot_fill else spot_price
@@ -1036,6 +1080,184 @@ class HyperliquidExecutor:
                 "status": "ERROR",
                 "dry_run": False,
                 "coin": coin,
+                "error": str(e),
+                "latency_ms": int((time.time() - start_t) * 1000)
+            }
+
+    def execute_dual_ioc_unwind(
+        self,
+        coin: str = "HYPE",
+        qty: Optional[float] = None,
+        pct: float = 100.0,
+        max_slippage_pct: float = 0.30,
+        dry_run: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Unwinds (closes) a Delta-Neutral Spot Long + Perp Short position on Hyperliquid:
+        - Leg 1: Perp Buy IOC (closes perp short position with reduce_only=True)
+        - Leg 2: Spot Sell IOC (sells spot tokens for USDC)
+        """
+        start_t = time.time()
+        c = coin.upper()
+        spot_info = self.resolve_spot_market_pair(c)
+        spot_pair = spot_info["raw_pair_name"] if spot_info else c
+
+        # 1. Fetch current positions
+        perp_state = self.client.get_clearinghouse_state(self.account_address) if self.account_address else {}
+        spot_state = self.client.get_spot_clearinghouse_state(self.account_address) if self.account_address else {}
+
+        perp_positions = perp_state.get("assetPositions", [])
+        matched_perp = None
+        for p in perp_positions:
+            pos_dict = p.get("position", {})
+            if pos_dict.get("coin", "").upper() == c:
+                matched_perp = pos_dict
+                break
+
+        current_perp_szi = safe_float(matched_perp.get("szi", 0.0)) if matched_perp else 0.0
+        current_short_qty = abs(current_perp_szi) if current_perp_szi < 0 else 0.0
+
+        spot_balances = spot_state.get("balances", [])
+        matched_spot = None
+        for b in spot_balances:
+            if b.get("coin", "").upper() == c:
+                matched_spot = b
+                break
+
+        current_spot_qty = safe_float(matched_spot.get("total", 0.0)) if matched_spot else 0.0
+
+        if current_short_qty <= 0.0 and current_spot_qty <= 0.0 and not dry_run:
+            return {
+                "status": "NO_POSITION",
+                "coin": c,
+                "message": f"No active {c} short position or spot balance found to unwind."
+            }
+
+        # Determine target unwind quantity
+        if qty is not None and qty > 0:
+            target_qty = float(qty)
+        else:
+            base_size = current_short_qty if current_short_qty > 0 else current_spot_qty
+            target_qty = base_size * (pct / 100.0)
+
+        # Cap by available positions if live
+        if not dry_run:
+            if current_short_qty > 0:
+                target_qty = min(target_qty, current_short_qty)
+            if current_spot_qty > 0:
+                target_qty = min(target_qty, current_spot_qty)
+
+        # Fetch current L2 books
+        perp_book = self.client.get_l2_book(c)
+        spot_book = self.client.get_l2_book(spot_pair)
+
+        perp_asks = perp_book.get("levels", [[], []])[1]
+        spot_bids = spot_book.get("levels", [[], []])[0]
+
+        best_perp_ask = safe_float(perp_asks[0]["px"]) if perp_asks else 0.0
+        best_spot_bid = safe_float(spot_bids[0]["px"]) if spot_bids else 0.0
+
+        slippage_mult = max_slippage_pct / 100.0
+        perp_limit_px = self.round_hl_price(best_perp_ask * (1.0 + slippage_mult)) if best_perp_ask > 0 else 0.0
+        spot_limit_px = self.round_hl_price(best_spot_bid * (1.0 - slippage_mult)) if best_spot_bid > 0 else 0.0
+
+        unwind_spread_pct = ((best_perp_ask - best_spot_bid) / best_spot_bid * 100.0) if best_spot_bid > 0 else 0.0
+
+        if dry_run or not getattr(self, "_sdk_available", False) or not self.agent_private_key:
+            return {
+                "status": "SIMULATED_SUCCESS",
+                "dry_run": True,
+                "coin": c,
+                "spot_pair": spot_pair,
+                "target_qty": target_qty,
+                "current_short_qty": current_short_qty,
+                "current_spot_qty": current_spot_qty,
+                "best_perp_ask": best_perp_ask,
+                "best_spot_bid": best_spot_bid,
+                "perp_limit_px": perp_limit_px,
+                "spot_limit_px": spot_limit_px,
+                "unwind_spread_pct": unwind_spread_pct,
+                "notional_usd": target_qty * best_perp_ask,
+                "latency_ms": 1,
+                "message": f"Unwind simulation for {target_qty} {c} completed (dry-run)."
+            }
+
+        try:
+            account = self.Account.from_key(self.agent_private_key)
+            exchange = self.Exchange(account, self.base_url, account_address=self.account_address)
+
+            def parse_order_status(res: Any) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+                if isinstance(res, dict) and res.get("status") == "ok":
+                    statuses = res.get("response", {}).get("data", {}).get("statuses", [])
+                    if statuses:
+                        s0 = statuses[0]
+                        if "filled" in s0:
+                            return True, s0["filled"], None
+                        elif "resting" in s0:
+                            return True, s0["resting"], None
+                        elif "error" in s0:
+                            return False, None, s0["error"]
+                err = res.get("response") if isinstance(res, dict) else str(res)
+                return False, None, str(err)
+
+            # Step 1: Buy to close Perp short with reduce_only=True
+            perp_res = exchange.order(
+                name=c,
+                is_buy=True,
+                sz=target_qty,
+                limit_px=perp_limit_px,
+                order_type={"limit": {"tif": "Ioc"}},
+                reduce_only=True
+            )
+            perp_ok, perp_fill, perp_err = parse_order_status(perp_res)
+            filled_perp_sz = safe_float(perp_fill.get("totalSz", 0.0)) if perp_fill else 0.0
+
+            # Step 2: Sell Spot tokens
+            spot_res = None
+            spot_ok = False
+            spot_fill = None
+            spot_err = None
+
+            sell_spot_sz = filled_perp_sz if filled_perp_sz > 0 else target_qty
+            if sell_spot_sz > 0 and current_spot_qty > 0:
+                time.sleep(0.005) # 5ms guard against duplicate nonce
+                sell_sz = min(sell_spot_sz, current_spot_qty)
+                spot_res = exchange.order(
+                    name=spot_pair,
+                    is_buy=False,
+                    sz=sell_sz,
+                    limit_px=spot_limit_px,
+                    order_type={"limit": {"tif": "Ioc"}},
+                    reduce_only=False
+                )
+                spot_ok, spot_fill, spot_err = parse_order_status(spot_res)
+
+            latency_ms = int((time.time() - start_t) * 1000)
+            is_success = perp_ok and (spot_ok or current_spot_qty <= 0)
+
+            exec_perp_px = float(perp_fill.get("avgPx", best_perp_ask)) if perp_fill else best_perp_ask
+            exec_spot_px = float(spot_fill.get("avgPx", best_spot_bid)) if spot_fill else best_spot_bid
+
+            return {
+                "status": "SUCCESS" if is_success else "PARTIAL_OR_FAILED",
+                "dry_run": False,
+                "coin": c,
+                "spot_pair": spot_pair,
+                "qty": target_qty,
+                "latency_ms": latency_ms,
+                "exec_perp_px": exec_perp_px,
+                "exec_spot_px": exec_spot_px,
+                "perp_filled": perp_fill,
+                "spot_filled": spot_fill,
+                "perp_error": perp_err,
+                "spot_error": spot_err,
+                "message": "Dual-IOC unwind executed successfully." if is_success else f"Unwind incomplete: perp_err={perp_err}, spot_err={spot_err}"
+            }
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "dry_run": False,
+                "coin": c,
                 "error": str(e),
                 "latency_ms": int((time.time() - start_t) * 1000)
             }

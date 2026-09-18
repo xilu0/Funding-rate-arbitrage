@@ -614,6 +614,17 @@ def main():
     arb_p.add_argument("--dry-run", action="store_true", default=True, help="Simulate trade plan without live execution (default: True)")
     arb_p.add_argument("--force", action="store_true", help="Submit live orders to Hyperliquid (Requires Agent Wallet key & SDK)")
 
+    # 9. close / unwind
+    close_p = subparsers.add_parser("close", parents=[common_parser], help="[平仓/清仓] 双边市价平仓锁定利润或变现 (Dual IOC)")
+    close_p.add_argument("--coin", type=str, default="HYPE", help="Target coin (default: HYPE)")
+    close_p.add_argument("--qty", type=float, default=None, help="Quantity to close (e.g. 1.0)")
+    close_p.add_argument("--pct", type=float, default=100.0, help="Percentage of position to close (default: 100.0)")
+    close_p.add_argument("--force", action="store_true", help="Submit live close orders to Hyperliquid")
+
+    # 10. market / rate
+    mkt_p = subparsers.add_parser("market", parents=[common_parser], help="[行情查询] 查询指定币种的实时价格、基差、资金费率与套利测算")
+    mkt_p.add_argument("--coin", type=str, default="HYPE", help="Target coin (default: HYPE)")
+
 
     args = parser.parse_args()
 
@@ -749,10 +760,77 @@ def main():
                 console.print("\n[bold red]⚡ 正在向 Hyperliquid 提交实盘订单...[/bold red]")
                 exec_res = executor.execute_arbitrage_plan(plan, dry_run=False)
                 if exec_res.get("status") in ["SPOT_ORDER_PLACED", "SUCCESS"]:
-                    console.print(f"[bold green]✅ 现货 Post-Only 挂单提交成功! (OID: {exec_res.get('spot_order_response', {}).get('response', {}).get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', '--')})[/bold green]")
-                    console.print("[dim]订单成交后将自动触发合约空头 IOC 对冲。[/dim]")
+                    if exec_res.get("spot_filled") and exec_res.get("perp_filled"):
+                        spot_f = exec_res.get("spot_filled", {})
+                        perp_f = exec_res.get("perp_filled", {})
+                        console.print(f"[bold green]✅ 双边 Taker-Taker (Dual IOC) 实盘建仓成功![/bold green]")
+                        console.print(f"  • 现货买入均价: ${exec_res.get('exec_spot_px', 0):.4f} (成交量: {spot_f.get('totalSz', '--')} | OID: {spot_f.get('oid', '--')})")
+                        console.print(f"  • 合约开空均价: ${exec_res.get('exec_perp_px', 0):.4f} (成交量: {perp_f.get('totalSz', '--')} | OID: {perp_f.get('oid', '--')})")
+                        console.print(f"  • 锁定实际基差: {exec_res.get('exec_spread_pct', 0):+.4f}%")
+                        console.print(f"  • 双边撮合耗时: {exec_res.get('latency_ms', 0)}ms")
+                    elif exec_res.get("status") == "SPOT_ORDER_PLACED":
+                        console.print(f"[bold green]✅ 现货 Post-Only 挂单提交成功! (OID: {exec_res.get('spot_order_response', {}).get('response', {}).get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', '--')})[/bold green]")
+                        console.print("[dim]订单成交后将自动触发合约空头 IOC 对冲。[/dim]")
+                    else:
+                        console.print(f"[bold green]✅ 实盘建仓成功: {exec_res.get('message', '订单已完成')}[/bold green]")
                 else:
                     console.print(f"[bold red]❌ 实盘下单失败: {exec_res.get('error', exec_res.get('message', '未知错误'))}[/bold red]")
+                    if exec_res.get("spot_error"):
+                        console.print(f"  • 现货腿报错: {exec_res.get('spot_error')}")
+                    if exec_res.get("perp_error"):
+                        console.print(f"  • 合约腿报错: {exec_res.get('perp_error')}")
+        return
+
+    if args.subcommand in ["close", "unwind"]:
+        is_dry_run = not args.force
+        mode_str = "实盘执行" if args.force else "演练模拟 (DRY-RUN)"
+        console.print(f"[bold yellow]🔄 正在为 {args.coin} 执行平仓计划 ({mode_str})...[/bold yellow]")
+        res = executor.execute_dual_ioc_unwind(
+            coin=args.coin,
+            qty=args.qty,
+            pct=args.pct,
+            dry_run=is_dry_run
+        )
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get("status") == "NO_POSITION":
+                console.print(f"[bold red]❌ 未找到 {args.coin} 的有效持仓（空头合约或现货代币）。[/bold red]")
+            elif is_dry_run and res.get("status") == "SIMULATED_SUCCESS":
+                console.print(f"[bold green]📋 平仓演练方案 (DRY-RUN):[/bold green]")
+                console.print(f"  • 拟平仓数量: {res.get('target_qty')} {args.coin}")
+                console.print(f"  • 当前空头持仓: {res.get('current_short_qty')} | 现货余额: {res.get('current_spot_qty')}")
+                console.print(f"  • 合约平空限价 (Ask+Slippage): ${res.get('perp_limit_px'):.4f} (卖一: ${res.get('best_perp_ask'):.4f})")
+                console.print(f"  • 现货卖出限价 (Bid-Slippage): ${res.get('spot_limit_px'):.4f} (买一: ${res.get('best_spot_bid'):.4f})")
+                console.print(f"  • 平仓名义价值: ~${res.get('notional_usd', 0):.2f} USD")
+                console.print(f"\n[bold yellow]💡 [DRY-RUN 演练模式] 未向交易所提交真实订单。如需实盘执行，请添加 --force 参数。[/bold yellow]")
+            elif res.get("status") == "SUCCESS":
+                spot_f = res.get("spot_filled", {})
+                perp_f = res.get("perp_filled", {})
+                console.print(f"[bold green]✅ 双边 Taker-Taker (Dual IOC) 实盘平仓成功![/bold green]")
+                console.print(f"  • 合约平空均价: ${res.get('exec_perp_px', 0):.4f} (平仓量: {perp_f.get('totalSz', res.get('qty'))} | OID: {perp_f.get('oid', '--')})")
+                console.print(f"  • 现货卖出均价: ${res.get('exec_spot_px', 0):.4f} (卖出量: {spot_f.get('totalSz', '--')} | OID: {spot_f.get('oid', '--')})")
+                console.print(f"  • 双边平仓耗时: {res.get('latency_ms', 0)}ms")
+            else:
+                console.print(f"[bold red]❌ 实盘平仓失败: {res.get('error', res.get('message', '未知错误'))}[/bold red]")
+                if res.get("perp_error"):
+                    console.print(f"  • 合约平仓报错: {res.get('perp_error')}")
+                if res.get("spot_error"):
+                    console.print(f"  • 现货平仓报错: {res.get('spot_error')}")
+        return
+
+    if args.subcommand in ["market", "ticker", "rate"]:
+        try:
+            plan = executor.build_arbitrage_plan(coin=args.coin, amount_qty=1.0)
+            if args.json:
+                print(json.dumps(plan, indent=2))
+            else:
+                panel, tbl_ord, tbl_pnl, tbl_sch = render_arbitrage_plan(plan)
+                console.print(panel)
+                console.print(tbl_ord)
+                console.print(tbl_pnl)
+        except Exception as e:
+            console.print(f"[bold red]❌ 查询 {args.coin} 行情失败: {e}[/bold red]")
         return
 
 if __name__ == "__main__":

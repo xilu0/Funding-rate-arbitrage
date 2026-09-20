@@ -170,35 +170,52 @@ def render_status_report(health_data: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     tier_name = health_data.get("tier_name", "")
     tier_color = health_data.get("tier_color", "white")
     action = health_data.get("action_recommended", "")
+    account_value = health_data.get("account_value", 0.0)
+    effective_margin = health_data.get("effective_margin", 0.0)
+    spot_cash_usdc = health_data.get("spot_cash_usdc", 0.0)
+    spot_tokens_val = health_data.get("total_spot_valuation", 0.0)
+    perp_account_val = health_data.get("perp_account_value", 0.0)
 
     if HAS_RICH:
         summary_text = (
             f"[bold yellow]Master Account:[/bold yellow] {health_data.get('master_address', '')}\n"
-            f"[bold cyan]账户总权益 (Account Value):[/bold cyan] ${health_data.get('account_value', 0):,.2f} USD | "
-            f"[bold cyan]有效保证金 (Effective Margin):[/bold cyan] ${health_data.get('effective_margin', 0):,.2f} USD\n"
-            f"[bold cyan]现货现金 (Spot USDC):[/bold cyan] ${health_data.get('spot_cash_usdc', 0):,.2f} USD | "
+            f"[bold cyan]账户总权益 (Total Equity):[/bold cyan] ${account_value:,.2f} USD "
+            f"[dim](现货: ${spot_cash_usdc + spot_tokens_val:,.2f} │ 合约: ${perp_account_val:,.2f})[/dim] | "
+            f"[bold cyan]有效保证金 (Effective Margin):[/bold cyan] ${effective_margin:,.2f} USD\n"
+            f"[bold cyan]现货现金 (Spot USDC):[/bold cyan] ${spot_cash_usdc:,.2f} USD | "
             f"[bold cyan]已用保证金 (Margin Used):[/bold cyan] ${health_data.get('total_margin_used', 0):,.2f} USD\n"
             f"[bold cyan]保证金使用率 (Utilization):[/bold cyan] [{tier_color}][bold]{health_data.get('margin_utilization_pct', 0):.2f}%[/bold][/{tier_color}] | "
-            f"[bold cyan]方案 D 强平安全距离:[/bold cyan] [{tier_color}][bold]+{health_data.get('min_liq_distance_pct', 0):.2f}%[/bold][/{tier_color}]\n"
+            f"[bold cyan]方案 D 强平安全距离:[/bold cyan] [{tier_color}][bold]+{health_data.get('min_liq_distance_pct', 0):,.2f}%[/bold][/{tier_color}]\n"
             f"[bold cyan]未实现盈亏 (UPnL):[/bold cyan] ${health_data.get('total_upnl', 0):+,.2f} USD | "
             f"[bold green]累计已收资金费 (Cum Funding):[/bold green] ${health_data.get('cum_funding_total', 0):+,.2f} USD\n\n"
             f"[{tier_color}][bold]🛡️ 方案 D 风险梯队状态: {tier_name}[/bold]\n{action}[/{tier_color}]"
         )
         panel = Panel(summary_text, title="[bold magenta]📊 Hyperliquid 现货质押与对冲套利状态大盘 (Scheme D)[/bold magenta]")
 
-        spot_table = Table(title="🪙 现货资产与质押估值 (Spot Balances & 65% LTV Collateral)", show_lines=True, header_style="bold green")
+        spot_table = Table(title="🪙 现货资产与质押估值 (Spot Balances & Collateral Valuation)", show_lines=True, header_style="bold green")
         spot_table.add_column("币种 (Coin)", style="bold yellow")
         spot_table.add_column("持有数量 (Total Qty)", justify="right")
         spot_table.add_column("冻结中 (Hold)", justify="right")
+        spot_table.add_column("参考市价 (Price)", justify="right")
         spot_table.add_column("资产估值 (USD Value)", justify="right")
-        spot_table.add_column("质押保证金 (65% LTV)", justify="right", style="bold cyan")
+        spot_table.add_column("质押率 (LTV)", justify="center")
+        spot_table.add_column("质押保证金 (Collateral)", justify="right", style="bold cyan")
 
         spot_balances = health_data.get("spot_balances", [])
         if not spot_balances:
-            spot_table.add_row("无现货持仓", "-", "-", "$0.00", "$0.00")
+            spot_table.add_row("无现货持仓", "-", "-", "-", "$0.00", "-", "$0.00")
         else:
             for s in spot_balances:
-                spot_table.add_row(s["coin"], f"{s['total_qty']:,.4f}", f"{s['hold_qty']:,.4f}", f"${s['valuation_usd']:,.2f}", f"${s['collateral_value_usd']:,.2f}")
+                ltv_pct = s.get("ltv", 0.65) * 100.0
+                spot_table.add_row(
+                    s["coin"],
+                    f"{s['total_qty']:,.4f}",
+                    f"{s['hold_qty']:,.4f}",
+                    f"${s.get('price', 0.0):,.4f}",
+                    f"${s['valuation_usd']:,.2f}",
+                    f"{ltv_pct:.1f}%",
+                    f"${s['collateral_value_usd']:,.2f}"
+                )
 
         perp_table = Table(title="⚔️ 永续合约对冲仓位 (Perp Hedge Positions)", show_lines=True, header_style="bold cyan")
         perp_table.add_column("合约标的 (Coin)", style="bold yellow")
@@ -232,9 +249,9 @@ def render_status_report(health_data: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     col2_w = 44
 
     line1 = f"Master 账户地址 : {health_data.get('master_address', '')}"
-    line2 = pad_string(f"账户总权益 (Account Value) : ${health_data.get('account_value', 0):,.2f} USD", col1_w) + pad_string(f"有效保证金 (Effective Margin): ${health_data.get('effective_margin', 0):,.2f} USD", col2_w)
-    line3 = pad_string(f"现货现金 (Spot USDC Cash)  : ${health_data.get('spot_cash_usdc', 0):,.2f} USD", col1_w) + pad_string(f"已用保证金 (Margin Used)     : ${health_data.get('total_margin_used', 0):,.2f} USD", col2_w)
-    line4 = pad_string(f"保证金使用率 (Utilization) : {health_data.get('margin_utilization_pct', 0):.2f}%", col1_w) + pad_string(f"方案 D 强平安全距离         : +{health_data.get('min_liq_distance_pct', 0):.2f}%", col2_w)
+    line2 = pad_string(f"账户总权益 (Total Equity)  : ${account_value:,.2f} USD", col1_w) + pad_string(f"有效保证金 (Effective Margin): ${effective_margin:,.2f} USD", col2_w)
+    line3 = pad_string(f"现货现金 (Spot USDC Cash)  : ${spot_cash_usdc:,.2f} USD", col1_w) + pad_string(f"已用保证金 (Margin Used)     : ${health_data.get('total_margin_used', 0):,.2f} USD", col2_w)
+    line4 = pad_string(f"保证金使用率 (Utilization) : {health_data.get('margin_utilization_pct', 0):.2f}%", col1_w) + pad_string(f"方案 D 强平安全距离         : +{health_data.get('min_liq_distance_pct', 0):,.2f}%", col2_w)
     line5 = pad_string(f"未实现盈亏 (Total UPnL)    : ${health_data.get('total_upnl', 0):+,.2f} USD", col1_w) + pad_string(f"累计已收资金费 (Cum Funding) : ${health_data.get('cum_funding_total', 0):+,.2f} USD", col2_w)
 
     box_lines = [
@@ -251,15 +268,24 @@ def render_status_report(health_data: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     box = format_box("📊 Hyperliquid 现货质押与对冲套利状态大盘 (Scheme D)", box_lines, min_width=88)
 
     # Spot Table
-    headers_spot = ["币种 (Coin)", "持有数量 (Total Qty)", "冻结中 (Hold)", "资产估值 (USD Value)", "质押保证金 (65% LTV)"]
+    headers_spot = ["币种 (Coin)", "持有数量 (Total Qty)", "冻结中 (Hold)", "参考市价 (Price)", "资产估值 (USD Value)", "质押率 (LTV)", "质押保证金 (Collateral)"]
     rows_spot = []
     spot_balances = health_data.get("spot_balances", [])
     if not spot_balances:
-        rows_spot.append(["无现货持仓", "-", "-", "$0.00", "$0.00"])
+        rows_spot.append(["无现货持仓", "-", "-", "-", "$0.00", "-", "$0.00"])
     else:
         for s in spot_balances:
-            rows_spot.append([s["coin"], f"{s['total_qty']:,.4f}", f"{s['hold_qty']:,.4f}", f"${s['valuation_usd']:,.2f}", f"${s['collateral_value_usd']:,.2f}"])
-    spot_tbl = format_ascii_table("🪙 现货资产与质押估值 (Spot Balances & 65% LTV Collateral)", headers_spot, rows_spot, ["left", "right", "right", "right", "right"])
+            ltv_pct = s.get("ltv", 0.65) * 100.0
+            rows_spot.append([
+                s["coin"],
+                f"{s['total_qty']:,.4f}",
+                f"{s['hold_qty']:,.4f}",
+                f"${s.get('price', 0.0):,.4f}",
+                f"${s['valuation_usd']:,.2f}",
+                f"{ltv_pct:.1f}%",
+                f"${s['collateral_value_usd']:,.2f}"
+            ])
+    spot_tbl = format_ascii_table("🪙 现货资产与质押估值 (Spot Balances & Collateral Valuation)", headers_spot, rows_spot, ["left", "right", "right", "right", "right", "center", "right"])
 
     # Perp Table
     headers_perp = ["合约标的 (Coin)", "方向 (Side)", "持仓张数 (Size)", "开仓均价 (Entry Px)", "强平参考价 (Liq Px)", "未实现盈亏 (UPnL)", "累计资金费收益"]
@@ -281,6 +307,7 @@ def render_status_report(health_data: Dict[str, Any]) -> Tuple[Any, Any, Any]:
     perp_tbl = format_ascii_table("⚔️ 永续合约对冲仓位 (Perp Hedge Positions)", headers_perp, rows_perp, ["left", "center", "right", "right", "right", "right", "right"])
 
     return box, spot_tbl, perp_tbl
+
 
 
 def render_orders_table(orders: list) -> Any:

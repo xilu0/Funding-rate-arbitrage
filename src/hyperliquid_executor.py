@@ -274,10 +274,12 @@ class HyperliquidExecutor:
     def evaluate_scheme_d_health(self) -> Dict[str, Any]:
         """
         Evaluates Master Account's Scheme D (Collateral + Perp Hedge) Health:
-        - 65% LTV (35% Haircut) on Spot Collateral.
-        - 10% Cash Reserve / Buffer.
-        - Distance to Liquidation P_liq (approx +192.4%).
-        - Tier 1/2/3 Risk Alert triggers.
+        - Accurately prices Spot Collateral via live mark prices and token LTV (e.g. 65% on HYPE).
+        - Computes Total Equity = Spot USDC + Spot Tokens Valuation + Perp Net Equity.
+        - Computes Effective Margin = Spot USDC + Spot Collateral (Valuation * LTV) + Perp Net Equity.
+        - Calculates live distance to liquidation across active positions.
+        - Reflects true cumulative funding income (+ sign for earned cash flow).
+        - Evaluates Tier 1/2/3 Scheme D risk alerts.
         """
         if not self.account_address:
             raise ValueError("Master account address (HL_ACCOUNT_ADDRESS) is required for health evaluation.")
@@ -287,10 +289,10 @@ class HyperliquidExecutor:
 
         # Parse Margin & Balances
         margin_summary = clearinghouse.get("crossMarginSummary") or clearinghouse.get("marginSummary", {})
-        account_value = safe_float(margin_summary.get("accountValue", 0.0))
+        perp_account_value = safe_float(margin_summary.get("accountValue", 0.0))
         total_margin_used = safe_float(margin_summary.get("totalMarginUsed", 0.0))
         total_ntl_pos = safe_float(margin_summary.get("totalNtlPos", 0.0))
-        total_raw_usd = safe_float(margin_summary.get("totalRawUsd", 0.0)) or account_value
+        total_raw_usd = safe_float(margin_summary.get("totalRawUsd", 0.0)) or perp_account_value
         withdrawable = safe_float(clearinghouse.get("withdrawable", 0.0))
 
         # Perp Positions
@@ -307,7 +309,10 @@ class HyperliquidExecutor:
                     entry_px = safe_float(pos_data.get("entryPx", 0.0))
                     liq_px = safe_float(pos_data.get("liquidationPx", 0.0))
                     upnl = safe_float(pos_data.get("unrealizedPnl", 0.0))
-                    cum_funding = safe_float(pos_data.get("cumFunding", {}).get("allTime", 0.0))
+                    # Note: on Hyperliquid, position.cumFunding is funding paid out from position ledger.
+                    # A negative cumFunding value indicates positive net funding income earned by the account.
+                    cum_funding_raw = safe_float(pos_data.get("cumFunding", {}).get("allTime", 0.0))
+                    cum_funding = -cum_funding_raw
                     margin_used = safe_float(pos_data.get("marginUsed", 0.0))
 
                     total_upnl += upnl
@@ -315,7 +320,8 @@ class HyperliquidExecutor:
 
                     positions.append({
                         "coin": coin,
-                        "size": szi,
+                        "size": abs(szi),
+                        "raw_size": szi,
                         "side": "Short" if szi < 0 else "Long",
                         "entry_price": entry_px,
                         "liquidation_price": liq_px,
@@ -325,7 +331,39 @@ class HyperliquidExecutor:
                         "cum_funding": cum_funding
                     })
 
-        # Spot Balances & Collateral Valuation (65% LTV / 35% Haircut)
+        # Spot price map lookup (Spot market data & allMids)
+        token_prices: Dict[str, float] = {}
+        try:
+            spot_data = self.client.get_spot_market_data()
+            if isinstance(spot_data, tuple) and len(spot_data) >= 3:
+                tokens, universe, asset_ctxs = spot_data[0], spot_data[1], spot_data[2]
+                if isinstance(tokens, list) and isinstance(universe, list) and isinstance(asset_ctxs, list):
+                    token_by_idx = {t["index"]: t for t in tokens if isinstance(t, dict) and "index" in t}
+                    ctx_by_name = {ctx.get("coin"): ctx for ctx in asset_ctxs if isinstance(ctx, dict) and ctx.get("coin")}
+                    for u in universe:
+                        if isinstance(u, dict):
+                            pair_tokens = u.get("tokens", [])
+                            if len(pair_tokens) >= 2 and pair_tokens[1] == 0:  # Quote is USDC (token 0)
+                                base_idx = pair_tokens[0]
+                                base_token = token_by_idx.get(base_idx, {})
+                                base_name = base_token.get("name")
+                                pair_name = u.get("name")
+                                ctx = ctx_by_name.get(pair_name)
+                                if ctx and base_name:
+                                    px = safe_float(ctx.get("markPx") or ctx.get("midPx", 0.0))
+                                    if px > 0:
+                                        token_prices[base_name] = px
+        except Exception:
+            pass
+
+        all_mids: Dict[str, Any] = {}
+        if hasattr(self.client, "get_all_mids"):
+            try:
+                all_mids = self.client.get_all_mids()
+            except Exception:
+                pass
+
+        # Spot Balances & Collateral Valuation
         spot_balances = []
         total_spot_valuation = 0.0
         total_collateral_value = 0.0
@@ -336,40 +374,64 @@ class HyperliquidExecutor:
             total_qty = safe_float(bal.get("total", 0.0))
             hold_qty = safe_float(bal.get("hold", 0.0))
             entry_ntl = safe_float(bal.get("entryNtl", 0.0))
+            ltv = safe_float(bal.get("ltv", 0.65)) if bal.get("ltv") is not None else 0.65
 
             if coin == "USDC":
                 spot_cash_usdc += total_qty
             elif total_qty > 0:
-                # Estimate token value
-                valuation = entry_ntl if entry_ntl > 0 else total_qty
-                haircut_val = valuation * 0.65
+                price = token_prices.get(coin, 0.0)
+                if price <= 0.0 and all_mids and coin in all_mids:
+                    price = safe_float(all_mids.get(coin, 0.0))
+
+                if price > 0.0:
+                    valuation = total_qty * price
+                elif entry_ntl > 0.0:
+                    valuation = entry_ntl
+                    price = valuation / total_qty
+                else:
+                    valuation = 0.0
+                    price = 0.0
+
+                collateral_val = valuation * ltv
                 total_spot_valuation += valuation
-                total_collateral_value += haircut_val
+                total_collateral_value += collateral_val
 
                 spot_balances.append({
                     "coin": coin,
                     "total_qty": total_qty,
                     "hold_qty": hold_qty,
+                    "price": price,
                     "valuation_usd": valuation,
-                    "collateral_value_usd": haircut_val # 65% LTV
+                    "ltv": ltv,
+                    "collateral_value_usd": collateral_val
                 })
 
-        # Effective Margin & Utilization
-        effective_margin = total_raw_usd + spot_cash_usdc + total_collateral_value + total_upnl
+        # Total Account Value: Spot Cash USDC + Spot Tokens Valuation + Perp Margin Net Equity
+        total_account_value = spot_cash_usdc + total_spot_valuation + perp_account_value
+
+        # Effective Margin (Scheme D / Portfolio Margin): Spot USDC + Spot Collateral (65% LTV) + Perp Equity
+        effective_margin = spot_cash_usdc + total_collateral_value + perp_account_value
         margin_utilization_pct = (total_margin_used / effective_margin * 100.0) if effective_margin > 0 else 0.0
 
-        # Liquidation Distance for Scheme D
-        # Scheme D P_liq = P_0 / 0.342 approx +192.4%
-        # Distance to liq = (P_liq - P_current) / P_current
-        min_liq_distance_pct = 999.0
+        # Liquidation Distance for Scheme D & Live Positions
+        # For Short: (liq_px - ref_px) / ref_px * 100%
+        # For Long:  (ref_px - liq_px) / ref_px * 100%
+        min_liq_distance_pct = float("inf")
         for pos in positions:
-            if pos["liquidation_price"] > 0 and pos["entry_price"] > 0:
-                dist = (pos["liquidation_price"] - pos["entry_price"]) / pos["entry_price"] * 100.0
+            liq_px = pos.get("liquidation_price", 0.0)
+            entry_px = pos.get("entry_price", 0.0)
+            coin_name = pos.get("coin", "")
+            current_px = token_prices.get(coin_name, 0.0) or safe_float(all_mids.get(coin_name, 0.0)) or entry_px
+            if liq_px > 0 and current_px > 0:
+                if pos.get("side") == "Short":
+                    dist = (liq_px - current_px) / current_px * 100.0
+                else:
+                    dist = (current_px - liq_px) / current_px * 100.0
                 if dist < min_liq_distance_pct:
                     min_liq_distance_pct = dist
 
-        if min_liq_distance_pct == 999.0:
-            min_liq_distance_pct = 192.4 # Standard theoretical Scheme D default
+        if min_liq_distance_pct == float("inf"):
+            min_liq_distance_pct = 192.4  # Standard theoretical Scheme D default baseline
 
         # Determine Tier
         if min_liq_distance_pct < 8.0:
@@ -395,9 +457,13 @@ class HyperliquidExecutor:
 
         return {
             "master_address": self.account_address,
-            "account_value": account_value,
+            "account_value": total_account_value,
+            "total_account_value": total_account_value,
+            "perp_account_value": perp_account_value,
             "total_raw_usd": total_raw_usd,
             "spot_cash_usdc": spot_cash_usdc,
+            "total_spot_valuation": total_spot_valuation,
+            "total_collateral_value": total_collateral_value,
             "withdrawable": withdrawable,
             "total_margin_used": total_margin_used,
             "effective_margin": effective_margin,
@@ -406,6 +472,7 @@ class HyperliquidExecutor:
             "total_upnl": total_upnl,
             "cum_funding_total": cum_funding_total,
             "min_liq_distance_pct": min_liq_distance_pct,
+            "theoretical_liq_distance_pct": 192.4,
             "tier": tier,
             "tier_name": tier_name,
             "tier_color": tier_color,
@@ -413,6 +480,7 @@ class HyperliquidExecutor:
             "positions": positions,
             "spot_balances": spot_balances
         }
+
 
     def internal_usd_transfer(self, amount: float, to_perp: bool = True, dry_run: bool = False) -> Dict[str, Any]:
         """

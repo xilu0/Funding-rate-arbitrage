@@ -165,3 +165,14 @@ class HyperliquidClient:
             return res
         return {}
 
+    def get_all_mids(self) -> Dict[str, str]:
+        """
+        Fetches mid prices for all active perpetuals and spot pairs.
+        Returns dict mapping instrument symbol/pair (e.g. 'HYPE', '@107') to mid price string.
+        """
+        res = self._post({"type": "allMids"})
+        if isinstance(res, dict):
+            return res
+        return {}
+
+

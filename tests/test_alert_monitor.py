@@ -10,6 +10,13 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
         self.mock_notifier = MagicMock(spec=TelegramNotifier)
         self.mock_notifier.is_configured.return_value = True
         self.mock_notifier.send_message.return_value = (True, "Message sent successfully")
+        # Ensure default test environment has check_spread enabled regardless of local .env
+        self.env_patcher = patch.dict("os.environ", {"TELEGRAM_ALERT_CHECK_SPREAD": "true", "TELEGRAM_ALERT_CHECK_FUNDING": "true"})
+        self.env_patcher.start()
+
+    def tearDown(self):
+        self.env_patcher.stop()
+
 
     def test_symbol_matching(self):
         monitor = ArbitrageAlertMonitor(

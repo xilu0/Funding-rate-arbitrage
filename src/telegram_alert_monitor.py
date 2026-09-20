@@ -489,7 +489,7 @@ class ArbitrageAlertMonitor:
         dispatched = []
         for m in matched:
             coin = m.get("coin", "")
-            exchange = m.get("exchange", "")
+            exchange = m.get("exchange") or "Hyperliquid"
             self._last_metrics[f"{exchange}:{coin}"] = {
                 "timestamp": now,
                 "spot_price": m.get("spot_price"),

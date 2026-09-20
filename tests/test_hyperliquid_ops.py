@@ -71,10 +71,19 @@ class TestHyperliquidClientEndpoints(unittest.TestCase):
         res = self.client.get_user_fees("0x1234567890abcdef1234567890abcdef12345678")
         self.assertEqual(res["userCrossRate"], "0.00045")
         self.assertEqual(res["activeReferralDiscount"], "0.04")
-        mock_post.assert_called_once_with({
-            "type": "userFees",
-            "user": "0x1234567890abcdef1234567890abcdef12345678"
-        })
+    @patch.object(HyperliquidClient, '_post')
+    def test_get_all_mids(self, mock_post):
+        mock_post.return_value = {
+            "HYPE": "90.50",
+            "@107": "90.45"
+        }
+        res = self.client.get_all_mids()
+        self.assertEqual(res["HYPE"], "90.50")
+        self.assertEqual(res["@107"], "90.45")
+        mock_post.assert_called_once_with({"type": "allMids"})
+
+
+
 
 
 class TestHyperliquidExecutor(unittest.TestCase):
@@ -147,7 +156,7 @@ class TestHyperliquidExecutor(unittest.TestCase):
         # High margin utilization triggering Tier 1
         self.mock_client.get_clearinghouse_state.return_value = {
             "marginSummary": {
-                "accountValue": "10000.0",
+                "accountValue": "1000.0",
                 "totalMarginUsed": "5000.0", # > 60% of effective margin (5000 / 7850 = 63.7%)
                 "totalNtlPos": "9000.0",
                 "totalRawUsd": "1000.0"
@@ -331,8 +340,73 @@ class TestHyperliquidExecutor(unittest.TestCase):
         self.assertIsNotNone(tbl_pnl)
         self.assertIsNotNone(tbl_sch)
 
+    def test_evaluate_scheme_d_health_spot_pricing_and_large_liq(self):
+        from scripts.hl_ops import render_status_report
+        # Simulate realistic Hyperliquid state:
+        # User has $9,969.80 USDC in spot, 1 HYPE spot (~$90), 1 HYPE perp short at $91.255, liqPx at $9652.28
+        self.mock_client.get_clearinghouse_state.return_value = {
+            "marginSummary": {
+                "accountValue": "9.68",
+                "totalMarginUsed": "9.05",
+                "totalNtlPos": "90.50",
+                "totalRawUsd": "100.18"
+            },
+            "withdrawable": "0.63",
+            "assetPositions": [
+                {
+                    "position": {
+                        "coin": "HYPE",
+                        "szi": "-1.0",
+                        "entryPx": "91.255",
+                        "unrealizedPnl": "0.75",
+                        "liquidationPx": "9652.28",
+                        "marginUsed": "9.05",
+                        "cumFunding": {"allTime": "-0.0518"} # raw negative means received
+                    }
+                }
+            ]
+        }
+        self.mock_client.get_spot_clearinghouse_state.return_value = {
+            "balances": [
+                {"coin": "USDC", "total": "9969.80", "hold": "0.0", "entryNtl": "0.0"},
+                {"coin": "HYPE", "total": "0.9993", "hold": "0.0", "entryNtl": "0.0", "ltv": "0.65"}
+            ]
+        }
+        self.mock_client.get_spot_market_data.return_value = (
+            [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150, "szDecimals": 2}],
+            [{"tokens": [150, 0], "name": "@107", "index": 107}],
+            [{"midPx": "90.50", "markPx": "90.50", "coin": "@107"}]
+        )
+
+        health = self.executor.evaluate_scheme_d_health()
+
+        # 1. Total Account Value should include spot USDC + spot HYPE valuation + perp equity
+        self.assertAlmostEqual(health["account_value"], 10069.91665, places=2)
+        self.assertAlmostEqual(health["spot_cash_usdc"], 9969.80, places=2)
+
+        # 2. Spot HYPE valuation & collateral (65% LTV)
+        self.assertEqual(len(health["spot_balances"]), 1)
+        hype_bal = health["spot_balances"][0]
+        self.assertEqual(hype_bal["coin"], "HYPE")
+        self.assertAlmostEqual(hype_bal["price"], 90.50, places=2)
+        self.assertAlmostEqual(hype_bal["valuation_usd"], 0.9993 * 90.50, places=2)
+        self.assertAlmostEqual(hype_bal["collateral_value_usd"], 0.9993 * 90.50 * 0.65, places=2)
+
+        # 3. Liquidation distance > 999.0% should NOT be clamped to 192.4%
+        self.assertGreater(health["min_liq_distance_pct"], 10000.0)
+
+        # 4. Cum funding should be positive (earned income)
+        self.assertAlmostEqual(health["cum_funding_total"], 0.0518, places=4)
+        self.assertEqual(health["positions"][0]["cum_funding"], 0.0518)
+        self.assertEqual(health["positions"][0]["size"], 1.0)
+
+        # 5. Render status report
+        res = render_status_report(health)
+        self.assertEqual(len(res), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

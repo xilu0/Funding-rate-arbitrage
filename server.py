@@ -117,7 +117,7 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
                 "✅ 收到此消息表示 Telegram Bot、Chat ID 与网络代理配置完全正常！\n"
                 f"📡 监听交易所: `{self.alert_monitor.exchange}`\n"
                 f"🪙 监听标的: `{', '.join(self.alert_monitor.symbols)}`\n"
-                f"📊 参考基差: `{'开启 (>= +' + str(self.alert_monitor.min_spread_pct) + '%)' if self.alert_monitor.check_spread else '关闭'}`\n"
+                f"📊 参考基差: `{'开启 (需 > 0.10% 且 >= +' + str(self.alert_monitor.min_spread_pct) + '%)' if self.alert_monitor.check_spread else '关闭 (建仓硬底线 > 0.10%)'}`\n"
                 f"💰 参考费率: `{'开启 (>= +' + str(self.alert_monitor.min_apr_pct) + '%)' if self.alert_monitor.check_funding else '关闭'}`"
             )
             payload = {
@@ -890,7 +890,7 @@ def start_web_server(port: int,
         ws_mode = "⚡ WebSocket 实时推流 (毫秒级响应 + 断线容灾)" if alert_monitor.ws_feed else f"🔄 REST 轮询 (间隔: {alert_monitor.poll_interval}s)"
         print(f"   ├─ 行情订阅模式: {ws_mode}")
         print(f"   ├─ 告警过滤策略: {'💎 仅推送达标稳健基差 (杜绝短命假毛刺)' if alert_monitor.only_reliable else '⚠️ 允许未达标瞬态毛刺告警'}")
-        print(f"   ├─ 参考基差: {'开启 (>= +' + str(alert_monitor.min_spread_pct) + '%)' if alert_monitor.check_spread else '关闭'}")
+        print(f"   ├─ 参考基差: {'开启 (需 > +0.10% 且 >= +' + str(alert_monitor.min_spread_pct) + '%)' if alert_monitor.check_spread else '关闭 (建仓硬底线 > +0.10%)'}")
         print(f"   ├─ 参考费率: {'开启 (>= +' + str(alert_monitor.min_apr_pct) + '%)' if alert_monitor.check_funding else '关闭'}")
         print(f"   └─ 巡检间隔: {alert_monitor.poll_interval}s | 冷却时间: {alert_monitor.cooldown_minutes}m")
     else:

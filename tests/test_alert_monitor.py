@@ -83,7 +83,7 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
         self.assertEqual(key, "none")
 
     def test_evaluate_conditions_funding_only(self):
-        """Test separated evaluation: check_spread=False, check_funding=True (仅参考资金费率)."""
+        """Test evaluation when check_spread=False, check_funding=True (关注基差，仅当基差 > 0.1% 且费率高才提醒)."""
         monitor = ArbitrageAlertMonitor(
             notifier=self.mock_notifier,
             check_spread=False,
@@ -103,20 +103,31 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
         self.assertFalse(triggered)
         self.assertEqual(key, "none")
 
-        # 2. Funding is high -> Triggers
-        metric_funding_high = {
+        # 2. Funding is high, but spread <= 0.10% -> DOES NOT Trigger (提醒建仓必须关注基差，需 > 0.1%)
+        metric_funding_high_low_spread = {
             "coin": "HYPE",
             "spread_pct": 0.02,
             "apr_pct": 35.0,
             "hourly_funding_pct": 0.004
         }
-        triggered, reasons, key = monitor.evaluate_conditions(metric_funding_high)
+        triggered, reasons, key = monitor.evaluate_conditions(metric_funding_high_low_spread)
+        self.assertFalse(triggered)
+        self.assertEqual(key, "none")
+
+        # 3. Funding is high AND spread > 0.10% -> Triggers as funding
+        metric_funding_high_valid_spread = {
+            "coin": "HYPE",
+            "spread_pct": 0.12,
+            "apr_pct": 35.0,
+            "hourly_funding_pct": 0.004
+        }
+        triggered, reasons, key = monitor.evaluate_conditions(metric_funding_high_valid_spread)
         self.assertTrue(triggered)
         self.assertEqual(key, "funding")
         self.assertTrue(any("资金费率突破阈值" in r for r in reasons))
 
     def test_evaluate_conditions_both_enabled(self):
-        """Test both enabled: OR logic (either triggers, or both triggers)."""
+        """Test both enabled with mandatory basis > 0.1% check."""
         monitor = ArbitrageAlertMonitor(
             notifier=self.mock_notifier,
             check_spread=True,
@@ -125,30 +136,60 @@ class TestArbitrageAlertMonitor(unittest.TestCase):
             min_apr_pct=20.0
         )
 
-        # Spread high only -> Triggers as spread
+        # 1. Spread high only (>0.1%) -> Triggers as spread
         metric1 = {"spread_pct": 0.12, "apr_pct": 10.0}
         t1, r1, k1 = monitor.evaluate_conditions(metric1)
         self.assertTrue(t1)
         self.assertEqual(k1, "spread")
 
-        # Funding high only -> Triggers as funding
+        # 2. Funding high only, but spread <= 0.1% -> Does NOT trigger (建仓关注基差，需大于0.1%)
         metric2 = {"spread_pct": 0.03, "apr_pct": 25.0}
         t2, r2, k2 = monitor.evaluate_conditions(metric2)
-        self.assertTrue(t2)
-        self.assertEqual(k2, "funding")
+        self.assertFalse(t2)
+        self.assertEqual(k2, "none")
 
-        # Both high -> Triggers as both
+        # 3. Both high (spread > 0.1% and APR high) -> Triggers as both
         metric3 = {"spread_pct": 0.15, "apr_pct": 30.0}
         t3, r3, k3 = monitor.evaluate_conditions(metric3)
         self.assertTrue(t3)
         self.assertEqual(k3, "both")
         self.assertTrue(any("双重共振" in r for r in r3))
 
-        # Neither high -> Does not trigger
+        # 4. Neither high -> Does not trigger
         metric4 = {"spread_pct": 0.02, "apr_pct": 5.0}
         t4, r4, k4 = monitor.evaluate_conditions(metric4)
         self.assertFalse(t4)
         self.assertEqual(k4, "none")
+
+    def test_evaluate_conditions_strictly_greater_than_0_1_pct_boundary(self):
+        """Boundary test: spread_pct must be strictly > 0.10% to trigger an alert."""
+        monitor = ArbitrageAlertMonitor(
+            notifier=self.mock_notifier,
+            check_spread=True,
+            min_spread_pct=0.10,
+            check_funding=True,
+            min_apr_pct=20.0
+        )
+
+        # Exactly 0.100% -> Not greater than 0.10%, should NOT trigger
+        t_equal, _, k_equal = monitor.evaluate_conditions({"spread_pct": 0.1000, "apr_pct": 30.0})
+        self.assertFalse(t_equal)
+        self.assertEqual(k_equal, "none")
+
+        # 0.099% -> Should NOT trigger
+        t_below, _, k_below = monitor.evaluate_conditions({"spread_pct": 0.099, "apr_pct": 30.0})
+        self.assertFalse(t_below)
+        self.assertEqual(k_below, "none")
+
+        # Negative spread -> Should NOT trigger
+        t_neg, _, k_neg = monitor.evaluate_conditions({"spread_pct": -0.05, "apr_pct": 50.0})
+        self.assertFalse(t_neg)
+        self.assertEqual(k_neg, "none")
+
+        # 0.101% -> Strictly > 0.10%, SHOULD trigger
+        t_above, _, k_above = monitor.evaluate_conditions({"spread_pct": 0.101, "apr_pct": 30.0})
+        self.assertTrue(t_above)
+        self.assertEqual(k_above, "both")
 
     def test_format_alert_message_contains_funding_even_when_spread_triggered(self):
         """Verifies that the alert message always includes current funding rate and APR even when triggered by basis spread."""

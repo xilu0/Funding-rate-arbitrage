@@ -75,10 +75,10 @@ class ArbitrageAlertMonitor:
             self.check_spread = env_cs in ["true", "1", "yes", "on"]
 
         if min_spread_pct is not None:
-            self.min_spread_pct = float(min_spread_pct)
+            self.min_spread_pct = max(0.10, float(min_spread_pct))
         else:
             try:
-                self.min_spread_pct = float(os.getenv("TELEGRAM_ALERT_MIN_SPREAD_PCT", "0.10"))
+                self.min_spread_pct = max(0.10, float(os.getenv("TELEGRAM_ALERT_MIN_SPREAD_PCT", "0.10")))
             except ValueError:
                 self.min_spread_pct = 0.10
 
@@ -141,10 +141,15 @@ class ArbitrageAlertMonitor:
             env_or = os.getenv("TELEGRAM_ALERT_ONLY_RELIABLE", "true").strip().lower()
             self.only_reliable = env_or in ["true", "1", "yes", "on"]
 
-        self.auditor = getattr(auto_engine, "auditor", None) or BasisAuditor(
-            min_spread_pct=self.min_spread_pct,
-            min_apr_pct=self.min_apr_pct
-        )
+        if auto_engine and hasattr(auto_engine, "auditor") and auto_engine.auditor:
+            self.auditor = auto_engine.auditor
+            # Ensure auditor's min_spread_pct threshold is at least 0.10% for alert monitoring
+            self.auditor.min_spread_pct = max(self.min_spread_pct, self.auditor.min_spread_pct)
+        else:
+            self.auditor = BasisAuditor(
+                min_spread_pct=self.min_spread_pct,
+                min_apr_pct=self.min_apr_pct
+            )
 
     def is_enabled(self) -> bool:
         """Returns True if alert monitoring is enabled and Telegram credentials exist."""
@@ -362,9 +367,18 @@ class ArbitrageAlertMonitor:
         """
         Evaluates whether a metric triggers an alert based on check_spread and check_funding.
         Returns (is_triggered, reasons_list, trigger_key).
+
+        Quantitative Invariant:
+        套利建仓必须关注基差（正基差提供进场安全垫与手续费抗摩擦缓冲）。
+        基差必须大于 0.1% (且达到 min_spread_pct 阈值) 才值得建仓提醒。
+        若基差 <= 0.1%，即便资金费率高企，建仓也无安全垫，严格拦截不发提醒。
         """
-        spread_pct = metric.get("spread_pct", 0.0)
-        apr_pct = metric.get("apr_pct", 0.0)
+        spread_pct = float(metric.get("spread_pct") or 0.0)
+        apr_pct = float(metric.get("apr_pct") or 0.0)
+
+        # 核心防线: 关注基差，大于 0.1% 才值得提醒建仓
+        if spread_pct <= 0.10 or spread_pct < self.min_spread_pct:
+            return False, [], "none"
 
         spread_triggered = bool(self.check_spread and spread_pct >= self.min_spread_pct)
         funding_triggered = bool(self.check_funding and apr_pct >= self.min_apr_pct)
@@ -372,13 +386,19 @@ class ArbitrageAlertMonitor:
         reasons = []
         if spread_triggered and funding_triggered:
             trigger_key = "both"
-            reasons.append(f"⚡ 基差与资金费率双重共振 (基差 {spread_pct:+.3f}% >= {self.min_spread_pct:+.3f}% 且 年化 {apr_pct:+.2f}% >= {self.min_apr_pct:+.2f}%)")
+            reasons.append(
+                f"⚡ 基差与资金费率双重共振 (基差 {spread_pct:+.3f}% > 0.10%[阈值 {self.min_spread_pct:+.3f}%] 且 年化 {apr_pct:+.2f}% >= {self.min_apr_pct:+.2f}%)"
+            )
         elif spread_triggered:
             trigger_key = "spread"
-            reasons.append(f"⚡ 基差扩大突破阈值 (当前基差 {spread_pct:+.3f}% >= 阈值 {self.min_spread_pct:+.3f}%)")
+            reasons.append(
+                f"⚡ 基差扩大突破阈值 (当前基差 {spread_pct:+.3f}% > 0.10%[阈值 {self.min_spread_pct:+.3f}%])"
+            )
         elif funding_triggered:
             trigger_key = "funding"
-            reasons.append(f"💰 资金费率突破阈值 (当前年化 {apr_pct:+.2f}% >= 阈值 {self.min_apr_pct:+.2f}%)")
+            reasons.append(
+                f"💰 资金费率突破阈值 (当前年化 {apr_pct:+.2f}% >= 阈值 {self.min_apr_pct:+.2f}%，且基差 {spread_pct:+.3f}% > 0.10% 具备进场安全垫)"
+            )
         else:
             trigger_key = "none"
 

@@ -670,6 +670,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Standardize symbol aliasing (HYPER -> HYPE for Hyperliquid native ecosystem)
+    if hasattr(args, "coin") and args.coin:
+        if args.coin.strip().upper() in ["HYPER", "HYPE"]:
+            args.coin = "HYPE"
+        else:
+            args.coin = args.coin.strip().upper()
+
     if getattr(args, "version", False) or args.subcommand == "version":
         if args.json:
             print(json.dumps(get_diagnostics(), indent=2))

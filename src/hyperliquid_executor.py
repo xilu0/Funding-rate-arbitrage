@@ -682,12 +682,13 @@ class HyperliquidExecutor:
             tokens, spot_univ, spot_ctxs = self.client.get_spot_market_data()
             token_by_idx = {t["index"]: t for t in tokens}
             
+            norm_coin = "HYPE" if coin.upper() in ["HYPER", "HYPE"] else coin.upper()
             # Find base token index
-            matched_token = next((t for t in tokens if t.get("name", "").upper() == coin.upper()), None)
+            matched_token = next((t for t in tokens if t.get("name", "").upper() == norm_coin), None)
             if not matched_token:
                 # Try alias / prefix
                 from src.calculator import COMMON_PREFIX_ALIASES
-                alias = COMMON_PREFIX_ALIASES.get(coin.upper())
+                alias = COMMON_PREFIX_ALIASES.get(norm_coin)
                 if alias:
                     matched_token = next((t for t in tokens if t.get("name", "").upper() == alias.upper()), None)
 
@@ -716,7 +717,7 @@ class HyperliquidExecutor:
             return {
                 "raw_pair_name": raw_pair_name,
                 "display_name": display_name,
-                "base_symbol": matched_token.get("name", coin),
+                "base_symbol": matched_token.get("name", norm_coin),
                 "quote_symbol": quote_symbol,
                 "sz_decimals": int(matched_token.get("szDecimals", 2)),
                 "mid_px": safe_float(ctx.get("midPx", ctx.get("markPx", 0.0))),
@@ -739,8 +740,9 @@ class HyperliquidExecutor:
         - Computes Scheme D capital allocation (90% Spot Collateral with 65% LTV, 90% Perp Short, 10% Cash Buffer)
         - Computes Fee Savings and Payback Hours
         """
+        norm_coin = "HYPE" if coin.upper() in ["HYPER", "HYPE"] else coin.upper()
         perp_univ, perp_ctxs = self.client.get_perp_market_data()
-        matched_idx = next((i for i, u in enumerate(perp_univ) if u.get("name", "").upper() == coin.upper()), None)
+        matched_idx = next((i for i, u in enumerate(perp_univ) if u.get("name", "").upper() == norm_coin), None)
         if matched_idx is None:
             raise ValueError(f"Perpetual contract '{coin}' not found on Hyperliquid.")
 
@@ -751,13 +753,13 @@ class HyperliquidExecutor:
         perp_sz_decimals = int(perp_meta.get("szDecimals", 2))
 
         # Spot pair lookup
-        spot_info = self.resolve_spot_market_pair(coin)
-        raw_spot_pair = spot_info["raw_pair_name"] if spot_info else coin
-        display_spot_pair = spot_info["display_name"] if spot_info else f"{coin}/USDC"
+        spot_info = self.resolve_spot_market_pair(norm_coin)
+        raw_spot_pair = spot_info["raw_pair_name"] if spot_info else norm_coin
+        display_spot_pair = spot_info["display_name"] if spot_info else f"{norm_coin}/USDC"
         spot_sz_decimals = spot_info.get("sz_decimals", perp_sz_decimals) if spot_info else perp_sz_decimals
 
         # L2 Books
-        perp_book = self.client.get_l2_book(coin)
+        perp_book = self.client.get_l2_book(norm_coin)
         spot_book = self.client.get_l2_book(raw_spot_pair)
 
         perp_bids = perp_book.get("levels", [[], []])[0]

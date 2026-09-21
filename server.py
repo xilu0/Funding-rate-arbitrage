@@ -879,12 +879,24 @@ def start_web_server(port: int,
     if hourly_reporter and hourly_reporter.is_enabled():
         hourly_reporter.start()
 
+    import socket
+    local_ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+
     server = ThreadingHTTPServer(("0.0.0.0", port), ArbitrageServerHandler)
     print(f"===========================================================")
-    print(f"🔥 Capital Funding Rate Arbitrage Monitor Web Dashboard Live!")
-    print(f"👉 本地访问 (Local):   http://localhost:{port}")
-    print(f"👉 远程访问 (Remote):  http://35.75.35.2:{port}")
-    print(f"💡 SSH端口映射 (Tunnel): ssh -L {port}:localhost:{port} user@35.75.35.2")
+    print(f"🔥 Capital Funding Rate Arbitrage Monitor Live!")
+    print(f"👉 本地访问 (Local):     http://127.0.0.1:{port}")
+    if local_ip != "127.0.0.1":
+        print(f"👉 VPC/内网访问 (VPC):   http://{local_ip}:{port}")
+    print(f"💡 远程转发 (SSH Tunnel): ssh -L {port}:localhost:{port} <user>@<server>")
+    print(f"📱 外部监控: 本节点不开放公网 Web 访问，所有资金费收益与套利大盘由 Telegram Bot 自动推送")
     if alert_monitor and alert_monitor.is_enabled():
         print(f"🤖 Telegram 告警监听:  已启用 (标的: {', '.join(alert_monitor.symbols)} | 交易所: {alert_monitor.exchange})")
         ws_mode = "⚡ WebSocket 实时推流 (毫秒级响应 + 断线容灾)" if alert_monitor.ws_feed else f"🔄 REST 轮询 (间隔: {alert_monitor.poll_interval}s)"

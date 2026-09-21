@@ -19,6 +19,7 @@ A high-performance quantitative system for monitoring, analyzing, and executing 
 - **`src/bybit_executor.py`**: Delta-neutral arbitrage builder with quantitative risk guards (slippage cap, payback cap, spread cap) and dry-run safety simulation.
 - **`src/telegram_notifier.py`**: Client for Telegram Bot API notifications with HTTP/SOCKS5 proxy support, Markdown formatting, and entity parsing fallback.
 - **`src/telegram_alert_monitor.py`**: Quantitative background monitor auditing basis spread and funding rates, evaluating separated reference triggers, and dispatching actionable alerts.
+- **`src/hourly_funding_reporter.py`**: Automated Hourly Funding Reporter aggregating actual funding payments from Hyperliquid `userFunding`, cumulative earnings, Scheme D health and liquidation safety, and dispatching periodic Markdown reports to Telegram.
 - **`src/auto_arbitrage_engine.py`**: Strategy 2 automated basis-sniping engine with Scheme D dynamic capital sizing, anti-flicker persistence filtering, Dual-IOC taker execution, and Telegram reporting.
 - **`src/basis_auditor.py`**: Reliable Structural Basis Auditor certifying Volume-Weighted executable spread (VWAP), 30s rolling persistence, P10 lowest floor, depth multiples, and R-Score matrix.
 - **`src/version.py`**: Version management and runtime environment diagnostics (Python, Gopass, dependencies, virtualenv status).
@@ -81,6 +82,10 @@ gopass env trading/hyperliquid python3 scripts/hl_ops.py close --coin HYPE --qty
 
 # 5. 查询单币实时行情、基差与收益率测算
 python3 scripts/hl_ops.py market --coin HYPE
+
+# 6. 生成每小时资金费收益与 Scheme D 风控大盘 (支持 --send 推送至 Telegram)
+python3 scripts/hl_ops.py report
+python3 scripts/hl_ops.py report --send
 ```
 
 ---

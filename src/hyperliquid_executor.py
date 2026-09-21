@@ -1,5 +1,6 @@
 import time
 import os
+import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple, Optional
 import src.env
@@ -940,6 +941,16 @@ class HyperliquidExecutor:
         val = float(f"{px:.5g}")
         return round(val, max_decimals)
 
+    @staticmethod
+    def floor_to_decimals(val: float, decimals: int = 2) -> float:
+        """Floors a float to a given number of decimal places without IEEE-754 precision leakage."""
+        if val <= 0:
+            return 0.0
+        if decimals <= 0:
+            return float(math.floor(val))
+        factor = 10 ** decimals
+        return math.floor(round(val * factor, 8)) / factor
+
     def execute_arbitrage_plan(self, plan: Dict[str, Any], dry_run: bool = True) -> Dict[str, Any]:
         """
         Executes a prepared Delta-Neutral arbitrage plan on Hyperliquid:
@@ -1028,14 +1039,27 @@ class HyperliquidExecutor:
         perp_limit_px = self.round_hl_price(perp_price * (1.0 - slippage_mult))
         target_spread_pct = (perp_price - spot_price) / spot_price * 100.0 if spot_price > 0 else 0.0
 
+        spot_info = self.resolve_spot_market_pair(coin)
+        spot_sz_decimals = int(spot_info.get("sz_decimals", 2)) if spot_info else 2
+        perp_sz_decimals = 2
+        try:
+            perp_univ, _ = self.client.get_perp_market_data()
+            matched_u = next((u for u in perp_univ if u.get("name", "").upper() == coin.upper()), None)
+            if matched_u and "szDecimals" in matched_u:
+                perp_sz_decimals = int(matched_u["szDecimals"])
+        except Exception:
+            pass
+
+        exec_spot_qty = self.floor_to_decimals(qty, spot_sz_decimals)
+
         if dry_run or not getattr(self, "_sdk_available", False) or not self.agent_private_key:
-            simulated_notional_usd = qty * spot_price
+            simulated_notional_usd = exec_spot_qty * spot_price
             return {
                 "status": "SIMULATED_SUCCESS",
                 "dry_run": True,
                 "coin": coin,
                 "spot_pair": spot_pair,
-                "qty": qty,
+                "qty": exec_spot_qty,
                 "target_spot_px": spot_price,
                 "target_perp_px": perp_price,
                 "spot_limit_px": spot_limit_px,
@@ -1044,8 +1068,8 @@ class HyperliquidExecutor:
                 "exec_spread_pct": target_spread_pct,
                 "notional_usd": simulated_notional_usd,
                 "latency_ms": 1,
-                "spot_filled": {"avgPx": spot_price, "totalSz": qty, "oid": 9999901},
-                "perp_filled": {"avgPx": perp_price, "totalSz": qty, "oid": 9999902},
+                "spot_filled": {"avgPx": spot_price, "totalSz": exec_spot_qty, "oid": 9999901},
+                "perp_filled": {"avgPx": perp_price, "totalSz": exec_spot_qty, "oid": 9999902},
                 "message": "Dual-IOC dry-run simulation successfully completed (no live orders submitted)."
             }
 
@@ -1057,17 +1081,18 @@ class HyperliquidExecutor:
                 return exchange.order(
                     name=spot_pair,
                     is_buy=True,
-                    sz=qty,
+                    sz=exec_spot_qty,
                     limit_px=spot_limit_px,
                     order_type={"limit": {"tif": "Ioc"}},
                     reduce_only=False
                 )
 
             def place_perp():
+                exec_perp_qty = self.floor_to_decimals(qty, perp_sz_decimals)
                 return exchange.order(
                     name=coin,
                     is_buy=False,
-                    sz=qty,
+                    sz=exec_perp_qty,
                     limit_px=perp_limit_px,
                     order_type={"limit": {"tif": "Ioc"}},
                     reduce_only=False
@@ -1101,6 +1126,7 @@ class HyperliquidExecutor:
             # Step 2: Only hedge perp if spot filled (eliminates naked short risk)
             if spot_ok and filled_spot_sz > 0:
                 time.sleep(0.005) # 5ms guard ensures strictly increasing nonce on Hyperliquid L1
+                perp_hedge_sz = self.floor_to_decimals(filled_spot_sz, perp_sz_decimals)
                 def place_perp_matched(sz: float):
                     return exchange.order(
                         name=coin,
@@ -1110,7 +1136,7 @@ class HyperliquidExecutor:
                         order_type={"limit": {"tif": "Ioc"}},
                         reduce_only=False
                     )
-                perp_res = place_perp_matched(filled_spot_sz)
+                perp_res = place_perp_matched(perp_hedge_sz)
                 perp_ok, perp_fill, perp_err = parse_order_status(perp_res)
             elif not spot_ok:
                 perp_err = "SKIPPED_SPOT_NOT_FILLED"
@@ -1164,6 +1190,8 @@ class HyperliquidExecutor:
         Unwinds (closes) a Delta-Neutral Spot Long + Perp Short position on Hyperliquid:
         - Leg 1: Perp Buy IOC (closes perp short position with reduce_only=True)
         - Leg 2: Spot Sell IOC (sells spot tokens for USDC)
+        - Decouples perp and spot sizing according to respective szDecimals and balances.
+        - Strictly floors spot order size to szDecimals to avoid Insufficient balance / invalid size errors.
         """
         start_t = time.time()
         c = coin.upper()
@@ -1201,19 +1229,47 @@ class HyperliquidExecutor:
                 "message": f"No active {c} short position or spot balance found to unwind."
             }
 
-        # Determine target unwind quantity
-        if qty is not None and qty > 0:
-            target_qty = float(qty)
-        else:
-            base_size = current_short_qty if current_short_qty > 0 else current_spot_qty
-            target_qty = base_size * (pct / 100.0)
+        # 2. Resolve szDecimals for Perpetual and Spot
+        perp_sz_decimals = 2
+        try:
+            perp_univ, _ = self.client.get_perp_market_data()
+            matched_u = next((u for u in perp_univ if u.get("name", "").upper() == c), None)
+            if matched_u and "szDecimals" in matched_u:
+                perp_sz_decimals = int(matched_u["szDecimals"])
+        except Exception:
+            pass
 
-        # Cap by available positions if live
-        if not dry_run:
-            if current_short_qty > 0:
-                target_qty = min(target_qty, current_short_qty)
-            if current_spot_qty > 0:
-                target_qty = min(target_qty, current_spot_qty)
+        spot_sz_decimals = int(spot_info.get("sz_decimals", perp_sz_decimals)) if spot_info else perp_sz_decimals
+
+        # 3. Determine target unwind quantities for Perp and Spot independently
+        if qty is not None and qty > 0:
+            user_qty = float(qty)
+            if dry_run and current_short_qty <= 0 and current_spot_qty <= 0:
+                perp_target = user_qty
+                spot_target = user_qty
+            else:
+                perp_target = min(user_qty, current_short_qty) if current_short_qty > 0 else 0.0
+                spot_target = min(user_qty, current_spot_qty) if current_spot_qty > 0 else 0.0
+        else:
+            pct_mult = pct / 100.0
+            if dry_run and current_short_qty <= 0 and current_spot_qty <= 0:
+                perp_target = 1.0 * pct_mult
+                spot_target = 1.0 * pct_mult
+            else:
+                perp_target = current_short_qty * pct_mult
+                spot_target = current_spot_qty * pct_mult
+
+        perp_unwind_sz = self.floor_to_decimals(perp_target, perp_sz_decimals)
+        spot_unwind_sz = self.floor_to_decimals(spot_target, spot_sz_decimals)
+        target_qty = max(perp_unwind_sz, spot_unwind_sz)
+        spot_dust_remaining = max(0.0, current_spot_qty - spot_unwind_sz)
+
+        if not dry_run and perp_unwind_sz <= 0 and spot_unwind_sz <= 0:
+            return {
+                "status": "NO_POSITION",
+                "coin": c,
+                "message": f"Remaining {c} position or balance is below minimum lot size ({10**(-min(perp_sz_decimals, spot_sz_decimals))})."
+            }
 
         # Fetch current L2 books
         perp_book = self.client.get_l2_book(c)
@@ -1226,8 +1282,8 @@ class HyperliquidExecutor:
         best_spot_bid = safe_float(spot_bids[0]["px"]) if spot_bids else 0.0
 
         slippage_mult = max_slippage_pct / 100.0
-        perp_limit_px = self.round_hl_price(best_perp_ask * (1.0 + slippage_mult)) if best_perp_ask > 0 else 0.0
-        spot_limit_px = self.round_hl_price(best_spot_bid * (1.0 - slippage_mult)) if best_spot_bid > 0 else 0.0
+        perp_limit_px = self.round_hl_price(best_perp_ask * (1.0 + slippage_mult), perp_sz_decimals) if best_perp_ask > 0 else 0.0
+        spot_limit_px = self.round_hl_price(best_spot_bid * (1.0 - slippage_mult), spot_sz_decimals) if best_spot_bid > 0 else 0.0
 
         unwind_spread_pct = ((best_perp_ask - best_spot_bid) / best_spot_bid * 100.0) if best_spot_bid > 0 else 0.0
 
@@ -1238,6 +1294,11 @@ class HyperliquidExecutor:
                 "coin": c,
                 "spot_pair": spot_pair,
                 "target_qty": target_qty,
+                "perp_sz": perp_unwind_sz,
+                "spot_sz": spot_unwind_sz,
+                "spot_dust_remaining": spot_dust_remaining,
+                "perp_sz_decimals": perp_sz_decimals,
+                "spot_sz_decimals": spot_sz_decimals,
                 "current_short_qty": current_short_qty,
                 "current_spot_qty": current_spot_qty,
                 "best_perp_ask": best_perp_ask,
@@ -1247,7 +1308,7 @@ class HyperliquidExecutor:
                 "unwind_spread_pct": unwind_spread_pct,
                 "notional_usd": target_qty * best_perp_ask,
                 "latency_ms": 1,
-                "message": f"Unwind simulation for {target_qty} {c} completed (dry-run)."
+                "message": f"Unwind simulation for {perp_unwind_sz} {c} perp and {spot_unwind_sz} spot completed (dry-run)."
             }
 
         try:
@@ -1269,16 +1330,25 @@ class HyperliquidExecutor:
                 return False, None, str(err)
 
             # Step 1: Buy to close Perp short with reduce_only=True
-            perp_res = exchange.order(
-                name=c,
-                is_buy=True,
-                sz=target_qty,
-                limit_px=perp_limit_px,
-                order_type={"limit": {"tif": "Ioc"}},
-                reduce_only=True
-            )
-            perp_ok, perp_fill, perp_err = parse_order_status(perp_res)
-            filled_perp_sz = safe_float(perp_fill.get("totalSz", 0.0)) if perp_fill else 0.0
+            perp_res = None
+            perp_ok = False
+            perp_fill = None
+            perp_err = None
+            filled_perp_sz = 0.0
+
+            if perp_unwind_sz > 0:
+                perp_res = exchange.order(
+                    name=c,
+                    is_buy=True,
+                    sz=perp_unwind_sz,
+                    limit_px=perp_limit_px,
+                    order_type={"limit": {"tif": "Ioc"}},
+                    reduce_only=True
+                )
+                perp_ok, perp_fill, perp_err = parse_order_status(perp_res)
+                filled_perp_sz = safe_float(perp_fill.get("totalSz", 0.0)) if perp_fill else 0.0
+            else:
+                perp_ok = True
 
             # Step 2: Sell Spot tokens
             spot_res = None
@@ -1286,10 +1356,12 @@ class HyperliquidExecutor:
             spot_fill = None
             spot_err = None
 
-            sell_spot_sz = filled_perp_sz if filled_perp_sz > 0 else target_qty
-            if sell_spot_sz > 0 and current_spot_qty > 0:
+            # Sizing spot sell: match filled perp size if perp executed, or fallback to planned spot_unwind_sz
+            sell_candidate = filled_perp_sz if (perp_unwind_sz > 0 and perp_ok and filled_perp_sz > 0) else spot_unwind_sz
+            sell_sz = self.floor_to_decimals(min(sell_candidate, current_spot_qty), spot_sz_decimals)
+
+            if sell_sz > 0:
                 time.sleep(0.005) # 5ms guard against duplicate nonce
-                sell_sz = min(sell_spot_sz, current_spot_qty)
                 spot_res = exchange.order(
                     name=spot_pair,
                     is_buy=False,
@@ -1299,9 +1371,11 @@ class HyperliquidExecutor:
                     reduce_only=False
                 )
                 spot_ok, spot_fill, spot_err = parse_order_status(spot_res)
+            else:
+                spot_ok = True
 
             latency_ms = int((time.time() - start_t) * 1000)
-            is_success = perp_ok and (spot_ok or current_spot_qty <= 0)
+            is_success = perp_ok and spot_ok
 
             exec_perp_px = float(perp_fill.get("avgPx", best_perp_ask)) if perp_fill else best_perp_ask
             exec_spot_px = float(spot_fill.get("avgPx", best_spot_bid)) if spot_fill else best_spot_bid
@@ -1312,6 +1386,9 @@ class HyperliquidExecutor:
                 "coin": c,
                 "spot_pair": spot_pair,
                 "qty": target_qty,
+                "perp_sz": perp_unwind_sz,
+                "spot_sz": sell_sz,
+                "spot_dust_remaining": spot_dust_remaining,
                 "latency_ms": latency_ms,
                 "exec_perp_px": exec_perp_px,
                 "exec_spot_px": exec_spot_px,

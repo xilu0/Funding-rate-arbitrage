@@ -130,5 +130,66 @@ class TestServerTelegramAPI(unittest.TestCase):
         self.assertEqual(output["status"], "success")
         self.assertEqual(output["data"]["min_spread_pct"], 0.12)
 
+    def test_handle_api_telegram_hourly_report(self):
+        mock_reporter = MagicMock()
+        mock_reporter.build_report.return_value = {
+            "markdown": "Hourly report mock",
+            "total_payout_usdc": 0.019
+        }
+        handler = ArbitrageServerHandler.__new__(ArbitrageServerHandler)
+        handler.hourly_reporter = mock_reporter
+        handler.wfile = DummyWFile()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        handler.handle_api_telegram_hourly_report()
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["status"], "success")
+        self.assertEqual(output["data"]["total_payout_usdc"], 0.019)
+
+    def test_handle_api_telegram_hourly_status(self):
+        mock_reporter = MagicMock()
+        mock_reporter.get_status.return_value = {
+            "enabled": True,
+            "report_minute": 1,
+            "total_reports_sent": 5
+        }
+        handler = ArbitrageServerHandler.__new__(ArbitrageServerHandler)
+        handler.hourly_reporter = mock_reporter
+        handler.wfile = DummyWFile()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        handler.handle_api_telegram_hourly_status()
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["status"], "success")
+        self.assertTrue(output["data"]["enabled"])
+        self.assertEqual(output["data"]["total_reports_sent"], 5)
+
+    def test_handle_api_telegram_hourly_send(self):
+        mock_reporter = MagicMock()
+        mock_reporter.notifier.is_configured.return_value = True
+        mock_reporter.send_report.return_value = (True, "Report sent successfully")
+
+        handler = ArbitrageServerHandler.__new__(ArbitrageServerHandler)
+        handler.hourly_reporter = mock_reporter
+        handler.wfile = DummyWFile()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        handler.handle_api_telegram_hourly_send()
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["status"], "success")
+        mock_reporter.send_report.assert_called_once_with(force=True)
+
 if __name__ == "__main__":
     unittest.main()

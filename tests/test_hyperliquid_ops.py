@@ -404,6 +404,82 @@ class TestHyperliquidExecutor(unittest.TestCase):
         res = render_status_report(health)
         self.assertEqual(len(res), 3)
 
+    def test_floor_to_decimals(self):
+        # 1. Spot token with fee deduction (8 decimals -> 2 decimals)
+        self.assertEqual(HyperliquidExecutor.floor_to_decimals(0.99932801, 2), 0.99)
+        # 2. Exact contract integer / float
+        self.assertEqual(HyperliquidExecutor.floor_to_decimals(1.0, 2), 1.0)
+        # 3. Residue dust smaller than 1 lot
+        self.assertEqual(HyperliquidExecutor.floor_to_decimals(0.00932801, 2), 0.0)
+        # 4. Zero and negative
+        self.assertEqual(HyperliquidExecutor.floor_to_decimals(0.0, 2), 0.0)
+        self.assertEqual(HyperliquidExecutor.floor_to_decimals(-1.5, 2), 0.0)
+        # 5. Zero decimals (integer lot)
+        self.assertEqual(HyperliquidExecutor.floor_to_decimals(15.8, 0), 15.0)
+
+    def test_execute_dual_ioc_unwind_dry_run_with_fee_dust(self):
+        # Mock perp & spot state simulating real account:
+        # Perp short = -1.0, Spot total = 0.99932801
+        self.mock_client.get_clearinghouse_state.return_value = {
+            "assetPositions": [
+                {"position": {"coin": "HYPE", "szi": "-1.0", "entryPx": "91.255"}}
+            ]
+        }
+        self.mock_client.get_spot_clearinghouse_state.return_value = {
+            "balances": [
+                {"coin": "HYPE", "total": "0.99932801", "hold": "0.0"}
+            ]
+        }
+        self.mock_client.get_perp_market_data.return_value = (
+            [{"name": "HYPE", "szDecimals": 2}],
+            [{"funding": "0.0001", "midPx": "95.0", "markPx": "95.0"}]
+        )
+        self.mock_client.get_spot_market_data.return_value = (
+            [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150, "szDecimals": 2}],
+            [{"tokens": [150, 0], "name": "@107", "index": 107}],
+            [{"midPx": "95.0", "markPx": "95.0", "coin": "@107"}]
+        )
+        self.mock_client.get_l2_book.side_effect = lambda c: {
+            "levels": [[{"px": "94.9", "sz": "10.0"}], [{"px": "95.1", "sz": "10.0"}]]
+        }
+
+        # 1. Full unwind with --qty 1
+        res = self.executor.execute_dual_ioc_unwind(coin="HYPE", qty=1.0, dry_run=True)
+        self.assertEqual(res["status"], "SIMULATED_SUCCESS")
+        # Perp short must cleanly close the full 1.00 contract
+        self.assertEqual(res["perp_sz"], 1.0)
+        # Spot sell must be floored to 0.99 to prevent Insufficient Balance
+        self.assertEqual(res["spot_sz"], 0.99)
+        self.assertAlmostEqual(res["spot_dust_remaining"], 0.00932801, places=6)
+        self.assertEqual(res["perp_sz_decimals"], 2)
+        self.assertEqual(res["spot_sz_decimals"], 2)
+
+        # 2. Partial unwind with pct=50
+        res_50 = self.executor.execute_dual_ioc_unwind(coin="HYPE", pct=50.0, dry_run=True)
+        self.assertEqual(res_50["status"], "SIMULATED_SUCCESS")
+        self.assertEqual(res_50["perp_sz"], 0.5)
+        self.assertEqual(res_50["spot_sz"], 0.49)
+
+    def test_execute_dual_ioc_unwind_dust_only_no_position(self):
+        # Only dust left (< 0.01 lot size), no perp short
+        self.mock_client.get_clearinghouse_state.return_value = {"assetPositions": []}
+        self.mock_client.get_spot_clearinghouse_state.return_value = {
+            "balances": [{"coin": "HYPE", "total": "0.005", "hold": "0.0"}]
+        }
+        self.mock_client.get_perp_market_data.return_value = (
+            [{"name": "HYPE", "szDecimals": 2}],
+            [{"funding": "0.0001", "midPx": "95.0", "markPx": "95.0"}]
+        )
+        self.mock_client.get_spot_market_data.return_value = (
+            [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150, "szDecimals": 2}],
+            [{"tokens": [150, 0], "name": "@107", "index": 107}],
+            [{"midPx": "95.0", "markPx": "95.0", "coin": "@107"}]
+        )
+
+        res = self.executor.execute_dual_ioc_unwind(coin="HYPE", dry_run=False)
+        self.assertEqual(res["status"], "NO_POSITION")
+        self.assertIn("below minimum lot size", res["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

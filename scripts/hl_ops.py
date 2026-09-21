@@ -652,6 +652,13 @@ def main():
     mkt_p = subparsers.add_parser("market", parents=[common_parser], help="[行情查询] 查询指定币种的实时价格、基差、资金费率与套利测算")
     mkt_p.add_argument("--coin", type=str, default="HYPE", help="Target coin (default: HYPE)")
 
+    # 11. report / income
+    rep_p = subparsers.add_parser("report", parents=[common_parser], help="[资金费收益播报] 查看每小时资金费收益与套利大盘，或即时推送至 Telegram")
+    rep_p.add_argument("--send", action="store_true", help="Push the generated hourly report immediately to Telegram")
+    rep_p.add_argument("--force", action="store_true", help="Force send even if already sent in this hour")
+    inc_p = subparsers.add_parser("income", parents=[common_parser], help="Alias for report")
+    inc_p.add_argument("--send", action="store_true", help="Push the generated hourly report immediately to Telegram")
+    inc_p.add_argument("--force", action="store_true", help="Force send even if already sent in this hour")
 
     args = parser.parse_args()
 
@@ -825,18 +832,23 @@ def main():
                 console.print(f"[bold red]❌ 未找到 {args.coin} 的有效持仓（空头合约或现货代币）。[/bold red]")
             elif is_dry_run and res.get("status") == "SIMULATED_SUCCESS":
                 console.print(f"[bold green]📋 平仓演练方案 (DRY-RUN):[/bold green]")
-                console.print(f"  • 拟平仓数量: {res.get('target_qty')} {args.coin}")
-                console.print(f"  • 当前空头持仓: {res.get('current_short_qty')} | 现货余额: {res.get('current_spot_qty')}")
-                console.print(f"  • 合约平空限价 (Ask+Slippage): ${res.get('perp_limit_px'):.4f} (卖一: ${res.get('best_perp_ask'):.4f})")
-                console.print(f"  • 现货卖出限价 (Bid-Slippage): ${res.get('spot_limit_px'):.4f} (买一: ${res.get('best_spot_bid'):.4f})")
+                console.print(f"  • 拟平仓基准: {res.get('target_qty')} {args.coin}")
+                console.print(f"  • 合约平空委托: {res.get('perp_sz')} 张 (当前持仓: {res.get('current_short_qty')} | 限价: ${res.get('perp_limit_px', 0):.4f})")
+                dust = res.get('spot_dust_remaining', 0.0)
+                dust_str = f" | 预计留存碎屑: {dust:.8f}" if dust > 0 else ""
+                console.print(f"  • 现货卖出委托: {res.get('spot_sz')} {args.coin} (当前余额: {res.get('current_spot_qty')}{dust_str} | 限价: ${res.get('spot_limit_px', 0):.4f})")
+                console.print(f"  • 盘口参考价: 合约卖一 ${res.get('best_perp_ask', 0):.4f} │ 现货买一 ${res.get('best_spot_bid', 0):.4f}")
                 console.print(f"  • 平仓名义价值: ~${res.get('notional_usd', 0):.2f} USD")
                 console.print(f"\n[bold yellow]💡 [DRY-RUN 演练模式] 未向交易所提交真实订单。如需实盘执行，请添加 --force 参数。[/bold yellow]")
             elif res.get("status") == "SUCCESS":
                 spot_f = res.get("spot_filled", {})
                 perp_f = res.get("perp_filled", {})
                 console.print(f"[bold green]✅ 双边 Taker-Taker (Dual IOC) 实盘平仓成功![/bold green]")
-                console.print(f"  • 合约平空均价: ${res.get('exec_perp_px', 0):.4f} (平仓量: {perp_f.get('totalSz', res.get('qty'))} | OID: {perp_f.get('oid', '--')})")
-                console.print(f"  • 现货卖出均价: ${res.get('exec_spot_px', 0):.4f} (卖出量: {spot_f.get('totalSz', '--')} | OID: {spot_f.get('oid', '--')})")
+                console.print(f"  • 合约平空均价: ${res.get('exec_perp_px', 0):.4f} (平仓量: {perp_f.get('totalSz', res.get('perp_sz', res.get('qty')))} | OID: {perp_f.get('oid', '--')})")
+                console.print(f"  • 现货卖出均价: ${res.get('exec_spot_px', 0):.4f} (卖出量: {spot_f.get('totalSz', res.get('spot_sz', '--'))} | OID: {spot_f.get('oid', '--')})")
+                dust = res.get('spot_dust_remaining', 0.0)
+                if dust > 0:
+                    console.print(f"  • 现货手续费碎屑残留: {dust:.8f} {args.coin} (低于最小下单粒度，留存现货钱包)")
                 console.print(f"  • 双边平仓耗时: {res.get('latency_ms', 0)}ms")
             else:
                 console.print(f"[bold red]❌ 实盘平仓失败: {res.get('error', res.get('message', '未知错误'))}[/bold red]")
@@ -858,6 +870,26 @@ def main():
                 console.print(tbl_pnl)
         except Exception as e:
             console.print(f"[bold red]❌ 查询 {args.coin} 行情失败: {e}[/bold red]")
+        return
+
+    if args.subcommand in ["report", "income"]:
+        from src.hourly_funding_reporter import HourlyFundingReporter
+        reporter = HourlyFundingReporter(
+            account_address=args.account,
+            hl_client=executor.client
+        )
+        report_data = reporter.build_report(force=getattr(args, "force", False))
+        if args.json:
+            print(json.dumps(report_data, indent=2))
+        else:
+            console.print(report_data["markdown"])
+            if getattr(args, "send", False):
+                console.print("\n[bold yellow]📡 正在向 Telegram 推送资金费收益播报...[/bold yellow]")
+                success, msg = reporter.send_report(force=True)
+                if success:
+                    console.print(f"[bold green]✅ 播报推送成功: {msg}[/bold green]")
+                else:
+                    console.print(f"[bold red]❌ 播报推送失败: {msg}[/bold red]")
         return
 
 if __name__ == "__main__":

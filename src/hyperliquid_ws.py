@@ -50,6 +50,7 @@ class HyperliquidWsFeed:
         self.perp_books: Dict[str, Dict[str, Any]] = {}
         self.spot_books: Dict[str, Dict[str, Any]] = {}
         self.perp_ctxs: Dict[str, Dict[str, Any]] = {}
+        self.trades: Dict[str, List[Dict[str, Any]]] = {}
         self.mids: Dict[str, float] = {}
         self.latest_metrics: Dict[str, Dict[str, Any]] = {}
 
@@ -163,6 +164,7 @@ class HyperliquidWsFeed:
                 subscribed_coins.add(norm_sym)
                 self._send_subscribe(ws, {"type": "l2Book", "coin": norm_sym})
                 self._send_subscribe(ws, {"type": "activeAssetCtx", "coin": norm_sym})
+                self._send_subscribe(ws, {"type": "trades", "coin": norm_sym})
 
                 # Subscribe to spot l2Book
                 spot_raw = self.coin_to_spot_raw.get(norm_sym)
@@ -249,6 +251,27 @@ class HyperliquidWsFeed:
                     self.perp_books[coin] = book_entry
                     updated_coins.add(coin)
 
+        elif ch == "trades" and isinstance(data, list):
+            for tr in data:
+                c = tr.get("coin", "")
+                norm_c = "HYPE" if c in ["HYPER", "HYPE"] else c
+                if not norm_c:
+                    continue
+                trade_item = {
+                    "coin": norm_c,
+                    "side": tr.get("side", ""),
+                    "px": safe_float(tr.get("px", 0.0)),
+                    "sz": safe_float(tr.get("sz", 0.0)),
+                    "time": safe_float(tr.get("time", time.time() * 1000)) / 1000.0,
+                    "hash": tr.get("hash", "")
+                }
+                with self._lock:
+                    coin_trades = self.trades.setdefault(norm_c, [])
+                    coin_trades.append(trade_item)
+                    if len(coin_trades) > 200:
+                        self.trades[norm_c] = coin_trades[-200:]
+                updated_coins.add(norm_c)
+
         # Trigger real-time calculation and notify listeners
         for coin in updated_coins:
             metrics = self._calculate_realtime_metrics(coin)
@@ -278,6 +301,7 @@ class HyperliquidWsFeed:
             perp_book = self.perp_books.get(norm_coin)
             spot_book = self.spot_books.get(spot_raw)
             ctx = self.perp_ctxs.get(norm_coin, {})
+            recent_trades = list(self.trades.get(norm_coin, []))
 
         if not perp_book:
             return None
@@ -356,7 +380,10 @@ class HyperliquidWsFeed:
             "apy_pct": apy_pct,
             "roundtrip_payback_str": payback_str,
             "timestamp": time.time(),
-            "source": "websocket"
+            "source": "websocket",
+            "spot_book": spot_book,
+            "perp_book": perp_book,
+            "recent_trades": recent_trades
         }
 
     def get_metrics(self, coin: str) -> Optional[Dict[str, Any]]:

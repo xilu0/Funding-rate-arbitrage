@@ -69,6 +69,8 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
             self.handle_api_telegram_hourly_status()
         elif path == "/api/auto-arbitrage/status":
             self.handle_api_auto_arbitrage_status()
+        elif path in ["/api/basis/audit", "/api/basis-audit"]:
+            self.handle_api_basis_audit(parsed.query)
         else:
             # Fallback to serving static files from web/ directory
             super().do_GET()
@@ -240,6 +242,97 @@ class ArbitrageServerHandler(SimpleHTTPRequestHandler):
 
         response_bytes = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(response_bytes)))
+        self.end_headers()
+        self.wfile.write(response_bytes)
+
+    def handle_api_basis_audit(self, query_str: str):
+        params = urllib.parse.parse_qs(query_str)
+        coin = params.get("coin", ["HYPE"])[0].strip().upper()
+        norm_coin = "HYPE" if coin in ["HYPER", "HYPE"] else coin
+        notional_str = params.get("notional", ["500.0"])[0].strip()
+        try:
+            notional = float(notional_str)
+        except ValueError:
+            notional = 500.0
+
+        auditor = None
+        if self.alert_monitor and getattr(self.alert_monitor, "auditor", None):
+            auditor = self.alert_monitor.auditor
+        elif self.auto_engine and getattr(self.auto_engine, "auditor", None):
+            auditor = self.auto_engine.auditor
+
+        if not auditor:
+            from src.basis_auditor import BasisAuditor
+            auditor = BasisAuditor(
+                window_seconds=30.0,
+                min_spread_pct=0.10,
+                min_p10_floor_pct=0.02,
+                min_depth_multiple=2.5,
+                giant_order_usd=20000.0
+            )
+
+        ws_metric = None
+        if self.alert_monitor and getattr(self.alert_monitor, "hl_ws", None):
+            ws_metric = self.alert_monitor.hl_ws.get_metrics(norm_coin)
+
+        if ws_metric and ws_metric.get("spot_book") and ws_metric.get("perp_book"):
+            spot_px = float(ws_metric.get("spot_price", 0.0))
+            perp_px = float(ws_metric.get("perp_price", 0.0))
+            spread_pct = float(ws_metric.get("spread_pct", 0.0))
+            apr_pct = float(ws_metric.get("apr_pct", 0.0))
+            spot_book = ws_metric.get("spot_book")
+            perp_book = ws_metric.get("perp_book")
+        else:
+            try:
+                p_univ, p_ctxs = self.hl_client.get_perp_market_data()
+                s_toks, s_univ, s_ctxs = self.hl_client.get_spot_market_data()
+                matches = self.calculator.match_and_calculate(p_univ, p_ctxs, s_toks, s_univ, s_ctxs)
+                match = next((m for m in matches if m.get("coin", "").upper() == norm_coin), None)
+                if not match:
+                    payload = {"status": "error", "message": f"Coin {norm_coin} not found"}
+                    response_bytes = json.dumps(payload).encode("utf-8")
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Length", str(len(response_bytes)))
+                    self.end_headers()
+                    self.wfile.write(response_bytes)
+                    return
+
+                spot_raw = match.get("raw_spot_pair", "@107")
+                spot_px = float(match.get("spot_price", 0.0))
+                perp_px = float(match.get("perp_price", 0.0))
+                spread_pct = float(match.get("spread_pct", 0.0))
+                apr_pct = float(match.get("apr_pct", 0.0))
+                perp_book = self.hl_client.get_l2_book(norm_coin)
+                spot_book = self.hl_client.get_l2_book(spot_raw)
+                auditor.record_tick(norm_coin, spot_px, perp_px, spread_pct, apr_pct)
+            except Exception as e:
+                payload = {"status": "error", "message": f"Failed to fetch orderbook: {e}"}
+                response_bytes = json.dumps(payload).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(response_bytes)))
+                self.end_headers()
+                self.wfile.write(response_bytes)
+                return
+
+        audit_res = auditor.audit_basis(
+            coin=norm_coin,
+            current_spread_pct=spread_pct,
+            current_apr_pct=apr_pct,
+            spot_price=spot_px,
+            target_notional_usd=notional,
+            spot_book=spot_book,
+            perp_book=perp_book
+        )
+        payload = {"status": "success", "data": audit_res}
+        response_bytes = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(response_bytes)))

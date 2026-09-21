@@ -191,5 +191,44 @@ class TestServerTelegramAPI(unittest.TestCase):
         self.assertEqual(output["status"], "success")
         mock_reporter.send_report.assert_called_once_with(force=True)
 
+    def test_handle_api_basis_audit(self):
+        handler = ArbitrageServerHandler.__new__(ArbitrageServerHandler)
+        mock_auditor = MagicMock()
+        mock_auditor.audit_basis.return_value = {
+            "coin": "HYPE",
+            "is_reliable": True,
+            "grade": "A",
+            "cause_analysis": {
+                "cause_type": "WHALE_SUPPORTED",
+                "cause_title": "🚀 巨单资金真实驱动 (Whale Supported)"
+            }
+        }
+        mock_ws = MagicMock()
+        mock_ws.get_metrics.return_value = {
+            "spot_price": 82.0,
+            "perp_price": 82.20,
+            "spread_pct": 0.24,
+            "apr_pct": 20.0,
+            "spot_book": {"asks": [{"px": "82.00", "sz": "10.0"}]},
+            "perp_book": {"bids": [{"px": "82.20", "sz": "500.0"}]}
+        }
+        self.mock_monitor.auditor = mock_auditor
+        self.mock_monitor.hl_ws = mock_ws
+        handler.alert_monitor = self.mock_monitor
+
+        handler.wfile = DummyWFile()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        handler.handle_api_basis_audit("coin=HYPE&notional=500")
+
+        handler.send_response.assert_called_with(200)
+        output = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(output["status"], "success")
+        self.assertEqual(output["data"]["coin"], "HYPE")
+        self.assertEqual(output["data"]["grade"], "A")
+        self.assertEqual(output["data"]["cause_analysis"]["cause_type"], "WHALE_SUPPORTED")
+
 if __name__ == "__main__":
     unittest.main()

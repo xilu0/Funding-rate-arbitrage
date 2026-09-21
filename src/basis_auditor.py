@@ -20,7 +20,9 @@ class BasisAuditor:
         min_p10_floor_pct: float = 0.02,
         min_depth_multiple: float = 2.5,
         min_apr_pct: float = 12.0,
-        min_reliability_score: float = 80.0
+        min_reliability_score: float = 80.0,
+        giant_order_usd: float = 20000.0,
+        jitter_grace_seconds: float = 3.0
     ):
         self.window_seconds = float(window_seconds)
         self.min_spread_pct = float(min_spread_pct)
@@ -28,11 +30,74 @@ class BasisAuditor:
         self.min_depth_multiple = float(min_depth_multiple)
         self.min_apr_pct = float(min_apr_pct)
         self.min_reliability_score = float(min_reliability_score)
+        self.giant_order_usd = float(giant_order_usd)
+        self.jitter_grace_seconds = float(jitter_grace_seconds)
 
         # Rolling history per coin: List of { "time": float, "spread_pct": float, "spot_px": float, "perp_px": float, "apr_pct": float }
         self._history: Dict[str, List[Dict[str, Any]]] = {}
+        # Recent public trade flow per coin: List of { "time": float, "side": str, "px": float, "sz": float, "usd": float }
+        self._trades: Dict[str, List[Dict[str, Any]]] = {}
         # Streak start timestamp per coin: when spread first turned positive and stayed >= min_spread_pct
         self._streak_start: Dict[str, float] = {}
+        # Last timestamp when spread was strictly above threshold (for micro-jitter grace tolerance)
+        self._last_above_time: Dict[str, float] = {}
+
+    def record_trade(
+        self,
+        coin: str,
+        side: str,
+        px: float,
+        sz: float,
+        now: Optional[float] = None
+    ):
+        """Records a public trade into rolling trade flow buffer."""
+        c = coin.upper()
+        t = now if now is not None else time.time()
+        p = safe_float(px)
+        s = safe_float(sz)
+        if p <= 0.0 or s <= 0.0:
+            return
+
+        trade_list = self._trades.setdefault(c, [])
+        trade_list.append({
+            "time": t,
+            "side": str(side).upper(),
+            "px": p,
+            "sz": s,
+            "usd": p * s
+        })
+
+        # Keep rolling 180 seconds of trades
+        cutoff = t - 180.0
+        self._trades[c] = [tr for tr in trade_list if tr["time"] >= cutoff]
+
+    def get_recent_trade_flow(
+        self,
+        coin: str,
+        window_seconds: float = 30.0,
+        now: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Calculates aggressive taker buy vs sell flow in the specified time window."""
+        c = coin.upper()
+        t = now if now is not None else time.time()
+        cutoff = t - window_seconds
+        trades = [tr for tr in self._trades.get(c, []) if tr["time"] >= cutoff]
+
+        buy_usd = sum(tr["usd"] for tr in trades if tr["side"] in ["B", "BUY"])
+        sell_usd = sum(tr["usd"] for tr in trades if tr["side"] in ["A", "S", "SELL"])
+        buy_count = sum(1 for tr in trades if tr["side"] in ["B", "BUY"])
+        sell_count = sum(1 for tr in trades if tr["side"] in ["A", "S", "SELL"])
+        buy_ratio = (buy_usd / sell_usd) if sell_usd > 0 else (99.0 if buy_usd > 0 else 1.0)
+        return {
+            "window_seconds": window_seconds,
+            "trade_count": len(trades),
+            "taker_buy_usd": round(buy_usd, 2),
+            "taker_sell_usd": round(sell_usd, 2),
+            "net_buy_usd": round(buy_usd - sell_usd, 2),
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "buy_ratio": round(buy_ratio, 2)
+        }
 
     def record_tick(
         self,
@@ -43,7 +108,7 @@ class BasisAuditor:
         apr_pct: float,
         now: Optional[float] = None
     ):
-        """Records a market tick into the rolling time window."""
+        """Records a market tick into rolling time window with jitter-tolerant streak tracking."""
         c = coin.upper()
         t = now if now is not None else time.time()
 
@@ -56,17 +121,194 @@ class BasisAuditor:
             "apr_pct": apr_pct
         })
 
-        # Trim samples older than max(window_seconds * 2, 60.0) seconds
-        cutoff = t - max(self.window_seconds * 2.0, 60.0)
+        # Retain up to 1800 seconds (30 mins) for multi-minute analysis
+        cutoff = t - max(self.window_seconds * 3.0, 1800.0)
         self._history[c] = [s for s in samples if s["time"] >= cutoff]
 
-        # Update streak
+        # Jitter-tolerant continuous streak tracker:
+        # A single 50ms sub-threshold tick will not instantly zero out a 3-minute persistent trend
         if spread_pct >= self.min_spread_pct and spread_pct >= 0.0:
             if c not in self._streak_start:
                 self._streak_start[c] = t
-        else:
-            # Spread dropped below threshold -> reset streak
+            self._last_above_time[c] = t
+        elif spread_pct < 0.0:
+            # Outright backwardation inversion immediately resets streak
             self._streak_start.pop(c, None)
+            self._last_above_time.pop(c, None)
+        else:
+            # Positive but below min_spread_pct: check if within jitter grace window
+            last_above = self._last_above_time.get(c, 0.0)
+            if (t - last_above) > self.jitter_grace_seconds:
+                self._streak_start.pop(c, None)
+                self._last_above_time.pop(c, None)
+
+    def analyze_orderbook_causes(
+        self,
+        spot_price: float,
+        spot_book: Optional[Dict[str, Any]],
+        perp_book: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Scans L2 orderbook to detect giant whale orders, bid walls, and depth imbalance.
+        Identifies whether positive basis is supported by genuine big capital.
+        """
+        if isinstance(perp_book, dict):
+            perp_bids = perp_book.get("bids") or (perp_book.get("levels", [[], []])[0] if perp_book.get("levels") else [])
+            perp_asks = perp_book.get("asks") or (perp_book.get("levels", [[], []])[1] if perp_book.get("levels") else [])
+        else:
+            perp_bids, perp_asks = [], []
+
+        if isinstance(spot_book, dict):
+            spot_asks = spot_book.get("asks") or (spot_book.get("levels", [[], []])[1] if spot_book.get("levels") else [])
+        else:
+            spot_asks = []
+
+        # 1. Inspect Perpetual Bids
+        giant_bids = []
+        top5_bid_usd = 0.0
+        top10_bid_usd = 0.0
+        max_single_bid_usd = 0.0
+        max_single_bid_px = 0.0
+        max_single_bid_sz = 0.0
+
+        for idx, b in enumerate(perp_bids):
+            px = safe_float(b.get("px", 0.0))
+            sz = safe_float(b.get("sz", 0.0))
+            if px <= 0.0 or sz <= 0.0:
+                continue
+            usd_val = px * sz
+            if idx < 5:
+                top5_bid_usd += usd_val
+            if idx < 10:
+                top10_bid_usd += usd_val
+            if usd_val > max_single_bid_usd:
+                max_single_bid_usd = usd_val
+                max_single_bid_px = px
+                max_single_bid_sz = sz
+            if usd_val >= self.giant_order_usd:
+                giant_bids.append({
+                    "px": px,
+                    "sz": sz,
+                    "usd": round(usd_val, 2),
+                    "n": b.get("n", 1),
+                    "level_index": idx
+                })
+
+        # 2. Inspect Perpetual Asks
+        top5_perp_ask_usd = 0.0
+        for idx, a in enumerate(perp_asks[:5]):
+            px = safe_float(a.get("px", 0.0))
+            sz = safe_float(a.get("sz", 0.0))
+            if px > 0.0 and sz > 0.0:
+                top5_perp_ask_usd += px * sz
+
+        # 3. Inspect Spot Asks
+        top5_spot_ask_usd = 0.0
+        for idx, a in enumerate(spot_asks[:5]):
+            px = safe_float(a.get("px", 0.0))
+            sz = safe_float(a.get("sz", 0.0))
+            if px > 0.0 and sz > 0.0:
+                top5_spot_ask_usd += px * sz
+
+        imbalance = (top5_bid_usd / top5_perp_ask_usd) if top5_perp_ask_usd > 0 else 1.0
+        has_data = bool(perp_bids or perp_asks or spot_asks)
+
+        return {
+            "has_data": has_data,
+            "has_giant_orders": len(giant_bids) > 0,
+            "giant_bids": giant_bids[:5],
+            "max_single_bid_usd": round(max_single_bid_usd, 2),
+            "max_single_bid_px": max_single_bid_px,
+            "max_single_bid_sz": max_single_bid_sz,
+            "top5_bid_usd": round(top5_bid_usd, 2),
+            "top10_bid_usd": round(top10_bid_usd, 2),
+            "top5_perp_ask_usd": round(top5_perp_ask_usd, 2),
+            "top5_spot_ask_usd": round(top5_spot_ask_usd, 2),
+            "orderbook_imbalance": round(imbalance, 2)
+        }
+
+    def classify_cause(
+        self,
+        coin: str,
+        depth_mult: float,
+        ob_analysis: Dict[str, Any],
+        trade_flow: Dict[str, Any],
+        duration_seconds: float
+    ) -> Dict[str, Any]:
+        """
+        Classifies the basis driver into:
+        1. WHALE_SUPPORTED: Giant bid walls (>= $20k) or heavy taker buy flow (>= $30k) or strong imbalance (>= 2.0 with >= $50k top5 bids).
+        2. ORGANIC_PLATEAU: Healthy distributed depth (top5 bids >= $5k, depth_mult >= 2.0).
+        3. THIN_SPIKE: Thin orderbook (< $5k top5 bids or depth_mult < 2.0), noise/wick easily erased.
+        """
+        has_data = ob_analysis.get("has_data", False)
+        has_giant = ob_analysis.get("has_giant_orders", False)
+        top5_bid_usd = ob_analysis.get("top5_bid_usd", 0.0)
+        imbalance = ob_analysis.get("orderbook_imbalance", 1.0)
+        taker_buy_usd = trade_flow.get("taker_buy_usd", 0.0)
+        buy_ratio = trade_flow.get("buy_ratio", 1.0)
+
+        # Whale condition: Giant order, high imbalance with decent depth, or aggressive buy flow
+        is_whale = (
+            has_giant
+            or (top5_bid_usd >= 50000.0 and imbalance >= 2.0)
+            or (taker_buy_usd >= 30000.0 and buy_ratio >= 1.5)
+            or (depth_mult >= 10.0 and imbalance >= 2.0)
+        )
+
+        if not has_data:
+            # Synthetic / historical ticks without orderbook
+            cause_type = "ORGANIC_PLATEAU"
+            cause_title = "🟢 常规稳健平台 (Organic Plateau)"
+            min_required_duration = self.window_seconds
+            safe_for_manual = (duration_seconds >= min_required_duration)
+            recommended_action = "订单簿数据缺失，依据历史时间序列评估。"
+        elif is_whale:
+            cause_type = "WHALE_SUPPORTED"
+            cause_title = "🚀 巨单资金真实驱动 (Whale Supported)"
+            min_required_duration = 15.0
+            safe_for_manual = (duration_seconds >= min_required_duration)
+            if safe_for_manual:
+                recommended_action = "盘口巨单/大买单坚实托底，非瞬态毛刺，具备充裕操作时间，建议出手！"
+            else:
+                recommended_action = f"检测到大单/买单流，正在进行 15s 防撤单防欺骗验活 (已持续 {duration_seconds:.1f}s)..."
+        elif top5_bid_usd < 5000.0 or depth_mult < 2.0:
+            cause_type = "THIN_SPIKE"
+            cause_title = "⚠️ 虚假薄盘口毛刺 (Thin Spike / Noise)"
+            min_required_duration = 999999.0
+            safe_for_manual = False
+            recommended_action = "盘口偏薄或散单瞬态穿透，无大资金托底，严禁追单，算法坚决拦截。"
+        else:
+            cause_type = "ORGANIC_PLATEAU"
+            cause_title = "🟢 常规稳健平台 (Organic Plateau)"
+            min_required_duration = 60.0
+            safe_for_manual = (duration_seconds >= min_required_duration)
+            if safe_for_manual:
+                recommended_action = f"盘口分布均匀健康，基差形成稳健平台 (已维持 {duration_seconds:.1f}s >= 60s)，建议择机出手！"
+            else:
+                recommended_action = f"基差持续形成中 (已持续 {duration_seconds:.1f}s < 60s)，建议继续观察确认稳定平台。"
+
+        return {
+            "cause_type": cause_type,
+            "cause_title": cause_title,
+            "min_required_duration": min_required_duration,
+            "duration_seconds": round(duration_seconds, 1),
+            "safe_for_manual": safe_for_manual,
+            "has_giant_orders": has_giant,
+            "giant_bids": ob_analysis.get("giant_bids", []),
+            "max_single_bid_usd": ob_analysis.get("max_single_bid_usd", 0.0),
+            "max_single_bid_px": ob_analysis.get("max_single_bid_px", 0.0),
+            "max_single_bid_sz": ob_analysis.get("max_single_bid_sz", 0.0),
+            "top5_bid_usd": top5_bid_usd,
+            "top10_bid_usd": ob_analysis.get("top10_bid_usd", 0.0),
+            "top5_perp_ask_usd": ob_analysis.get("top5_perp_ask_usd", 0.0),
+            "top5_spot_ask_usd": ob_analysis.get("top5_spot_ask_usd", 0.0),
+            "orderbook_imbalance": imbalance,
+            "recent_taker_buy_usd": taker_buy_usd,
+            "recent_taker_sell_usd": trade_flow.get("taker_sell_usd", 0.0),
+            "taker_buy_ratio": buy_ratio,
+            "recommended_action": recommended_action
+        }
 
     @staticmethod
     def calculate_vwap_spread(
@@ -86,7 +328,11 @@ class BasisAuditor:
         target_qty = target_notional_usd / spot_price
 
         # 1. Spot Asks (Buying Spot)
-        spot_asks = spot_book.get("asks", []) if isinstance(spot_book, dict) else []
+        if isinstance(spot_book, dict):
+            spot_asks = spot_book.get("asks") or (spot_book.get("levels", [[], []])[1] if spot_book.get("levels") else [])
+        else:
+            spot_asks = []
+
         vwap_spot_ask = spot_price
         if spot_asks:
             filled_qty = 0.0
@@ -105,7 +351,11 @@ class BasisAuditor:
                 vwap_spot_ask = filled_cost / filled_qty
 
         # 2. Perp Bids (Selling Perp)
-        perp_bids = perp_book.get("bids", []) if isinstance(perp_book, dict) else []
+        if isinstance(perp_book, dict):
+            perp_bids = perp_book.get("bids") or (perp_book.get("levels", [[], []])[0] if perp_book.get("levels") else [])
+        else:
+            perp_bids = []
+
         vwap_perp_bid = spot_price
         total_perp_bid_usd = 0.0
 
@@ -190,6 +440,21 @@ class BasisAuditor:
         streak_start = self._streak_start.get(c)
         duration_seconds = (t - streak_start) if streak_start else 0.0
 
+        # Microstructure & Causal Driver Analysis
+        ob_analysis = self.analyze_orderbook_causes(
+            spot_price=spot_price,
+            spot_book=spot_book,
+            perp_book=perp_book
+        )
+        trade_flow = self.get_recent_trade_flow(coin=c, window_seconds=30.0, now=t)
+        cause_info = self.classify_cause(
+            coin=c,
+            depth_mult=depth_mult,
+            ob_analysis=ob_analysis,
+            trade_flow=trade_flow,
+            duration_seconds=duration_seconds
+        )
+
         # 3. Scoring System (0 ~ 100 Points)
 
         # Dimension A: Executable Depth & Liquidity (Max 30 pts)
@@ -236,21 +501,39 @@ class BasisAuditor:
         total_score = max(0.0, min(100.0, total_score))
 
         # Classification
-        if total_score >= self.min_reliability_score and p10_floor >= 0.0 and exec_spread_pct >= self.min_spread_pct:
-            grade = "A"
-            grade_badge = "💎 结构性稳健基差 (Structural Reliable)"
-            is_reliable = True
-            advice = "全要素稳健满足，盘口深厚且持续，建议从容建仓锁定升水！"
-        elif total_score >= 60.0:
-            grade = "B"
-            grade_badge = "🟢 观察确认中 (Maturing / Forming)"
-            is_reliable = False
-            advice = f"基差持续形成中 (已持续 {duration_seconds:.1f}s)，建议继续观察确认稳定平台。"
-        else:
+        if cause_info["cause_type"] == "THIN_SPIKE":
             grade = "C"
-            grade_badge = "⚠️ 瞬态高频毛刺 (Transient Spike / Noise)"
+            grade_badge = "⚠️ 虚假薄盘口毛刺 (Thin Spike / Noise)"
             is_reliable = False
-            advice = "盘口偏薄或持续时间极短 (<15s)，做市商易瞬间抹平，已被算法主动拦截。"
+            advice = cause_info["recommended_action"]
+        elif cause_info["cause_type"] == "WHALE_SUPPORTED":
+            if duration_seconds >= cause_info["min_required_duration"] and exec_spread_pct >= self.min_spread_pct and p10_floor >= 0.0:
+                grade = "A"
+                grade_badge = "🚀 巨单资金真实驱动 (Whale Supported)"
+                is_reliable = True
+                advice = f"盘口大额巨资托底 (已稳固 {duration_seconds:.1f}s >= 15s)，非瞬态毛刺，具备充裕操作时间，建议从容建仓锁定升水！"
+            else:
+                grade = "B"
+                grade_badge = "⏳ 巨资成型防撤单验证中 (Whale Verifying)"
+                is_reliable = False
+                advice = cause_info["recommended_action"]
+        else:
+            # ORGANIC_PLATEAU
+            if duration_seconds >= cause_info["min_required_duration"] and total_score >= self.min_reliability_score and p10_floor >= 0.0 and exec_spread_pct >= self.min_spread_pct:
+                grade = "A"
+                grade_badge = "💎 结构性稳健基差 (Structural Reliable)"
+                is_reliable = True
+                advice = "全要素稳健满足，盘口深厚且持续，建议从容建仓锁定升水！"
+            elif total_score >= 60.0:
+                grade = "B"
+                grade_badge = "🟢 观察确认中 (Maturing / Forming)"
+                is_reliable = False
+                advice = cause_info["recommended_action"]
+            else:
+                grade = "C"
+                grade_badge = "⚠️ 瞬态高频毛刺 (Transient Spike / Noise)"
+                is_reliable = False
+                advice = "盘口偏薄或持续时间极短 (<15s)，做市商易瞬间抹平，已被算法主动拦截。"
 
         return {
             "coin": c,
@@ -260,6 +543,7 @@ class BasisAuditor:
             "grade_badge": grade_badge,
             "is_reliable": is_reliable,
             "advice": advice,
+            "cause_analysis": cause_info,
             "metrics": {
                 "current_spread_pct": current_spread_pct,
                 "executable_spread_pct": exec_spread_pct,

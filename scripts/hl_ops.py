@@ -660,6 +660,14 @@ def main():
     inc_p.add_argument("--send", action="store_true", help="Push the generated hourly report immediately to Telegram")
     inc_p.add_argument("--force", action="store_true", help="Force send even if already sent in this hour")
 
+    # 12. basis / audit
+    basis_p = subparsers.add_parser("basis", parents=[common_parser], help="[基差动因透视] 深度扫描 L2 盘口大单、资金托底与成因诊断")
+    basis_p.add_argument("--coin", type=str, default="HYPE", help="Target coin (default: HYPE)")
+    basis_p.add_argument("--notional", type=float, default=500.0, help="Target notional in USD for depth test (default: 500)")
+    aud_p = subparsers.add_parser("audit", parents=[common_parser], help="Alias for basis")
+    aud_p.add_argument("--coin", type=str, default="HYPE", help="Target coin (default: HYPE)")
+    aud_p.add_argument("--notional", type=float, default=500.0, help="Target notional in USD for depth test (default: 500)")
+
     args = parser.parse_args()
 
     if getattr(args, "version", False) or args.subcommand == "version":
@@ -890,6 +898,137 @@ def main():
                     console.print(f"[bold green]✅ 播报推送成功: {msg}[/bold green]")
                 else:
                     console.print(f"[bold red]❌ 播报推送失败: {msg}[/bold red]")
+        return
+
+    if args.subcommand in ["basis", "audit"]:
+        from src.basis_auditor import BasisAuditor
+        coin = args.coin.upper()
+        norm_coin = "HYPE" if coin in ["HYPER", "HYPE"] else coin
+        notional = getattr(args, "notional", 500.0)
+
+        # 1. Fetch market data & orderbooks
+        hl = executor.client
+        p_univ, p_ctxs = hl.get_perp_market_data()
+        s_toks, s_univ, s_ctxs = hl.get_spot_market_data()
+
+        from src.calculator import FundingRateCalculator
+        calc = FundingRateCalculator()
+        matches = calc.match_and_calculate(p_univ, p_ctxs, s_toks, s_univ, s_ctxs)
+        match = next((m for m in matches if m.get("coin", "").upper() == norm_coin), None)
+
+        if not match:
+            console.print(f"[bold red]❌ 未在 Hyperliquid 找到 {norm_coin} 的期现匹配行情[/bold red]")
+            return
+
+        spot_raw = match.get("raw_spot_pair", "@107")
+        perp_book = hl.get_l2_book(norm_coin)
+        spot_book = hl.get_l2_book(spot_raw)
+
+        auditor = BasisAuditor(
+            window_seconds=30.0,
+            min_spread_pct=0.10,
+            min_p10_floor_pct=0.02,
+            min_depth_multiple=2.5,
+            giant_order_usd=20000.0
+        )
+        spot_px = float(match.get("spot_price", 0.0))
+        perp_px = float(match.get("perp_price", 0.0))
+        spread_pct = float(match.get("spread_pct", 0.0))
+        apr_pct = float(match.get("apr_pct", 0.0))
+        auditor.record_tick(norm_coin, spot_px, perp_px, spread_pct, apr_pct)
+
+        audit_res = auditor.audit_basis(
+            coin=norm_coin,
+            current_spread_pct=spread_pct,
+            current_apr_pct=apr_pct,
+            spot_price=spot_px,
+            target_notional_usd=notional,
+            spot_book=spot_book,
+            perp_book=perp_book
+        )
+
+        if args.json:
+            print(json.dumps(audit_res, indent=2))
+            return
+
+        from rich.table import Table
+        from rich.panel import Panel
+
+        cause = audit_res.get("cause_analysis", {})
+        metrics = audit_res.get("metrics", {})
+
+        title = f"🔬 Hyperliquid {norm_coin} 基差微观动因与可靠性量化透视"
+        overview_lines = [
+            f"[bold white]标的币种[/bold white] : {norm_coin} (现货: {spot_raw} | 合约: {norm_coin}-PERP)",
+            f"[bold white]现货买价[/bold white] : ${spot_px:,.4f} USD  |  [bold white]合约卖价[/bold white] : ${perp_px:,.4f} USD",
+            f"[bold white]名义基差[/bold white] : [bold {'green' if spread_pct > 0 else 'red'}]{spread_pct:+.3f}%[/bold {'green' if spread_pct > 0 else 'red'}]  |  [bold white]可执行 VWAP 基差[/bold white] : [bold {'green' if metrics.get('executable_spread_pct', 0) > 0 else 'red'}]{metrics.get('executable_spread_pct', 0):+.3f}%[/bold {'green' if metrics.get('executable_spread_pct', 0) > 0 else 'red'}] (规模: ${notional:,.0f})",
+            f"[bold white]资金费率[/bold white] : Simple APR [bold cyan]{apr_pct:+.2f}%[/bold cyan] (Compound APY {match.get('apy_pct', 0):+.2f}%)",
+            f"[bold white]动因定性[/bold white] : {cause.get('cause_title', '未知')}",
+            f"[bold white]稳健评级[/bold white] : [bold]{audit_res.get('grade')}[/bold] ({audit_res.get('reliability_score')}/100) - {audit_res.get('grade_badge')}",
+            f"[bold white]人工出手[/bold white] : {'[bold green]✅ 具备充裕操作时间，建议出手[/bold green]' if cause.get('safe_for_manual') else '[bold yellow]⚠️ 正在验证防闪撤 或 散单偏薄，谨慎追单[/bold yellow]'}",
+            f"[bold white]量化建议[/bold white] : [italic]{audit_res.get('advice')}[/italic]"
+        ]
+        console.print(Panel("\n".join(overview_lines), title=title, expand=False, border_style="cyan"))
+
+        ob_table = Table(title=f"🐋 {norm_coin} 合约盘口大单与深度透视 (前 5 档买盘 & 巨额挂单)", border_style="green")
+        ob_table.add_column("档位 (Level)", justify="center")
+        ob_table.add_column("买单价格 (Px)", justify="right")
+        ob_table.add_column("买单数量 (Sz)", justify="right")
+        ob_table.add_column("买单价值 (USD)", justify="right")
+        ob_table.add_column("巨单标志 (Whale)", justify="center")
+
+        bids = perp_book.get("bids") or (perp_book.get("levels", [[], []])[0] if perp_book.get("levels") else [])
+        for idx, b in enumerate(bids[:5]):
+            px = safe_float(b.get("px", 0.0))
+            sz = safe_float(b.get("sz", 0.0))
+            usd = px * sz
+            is_giant = (usd >= auditor.giant_order_usd)
+            giant_tag = "[bold red]🚨 巨鲸挂单[/bold red]" if is_giant else "普通挂单"
+            ob_table.add_row(
+                f"买 {idx + 1}",
+                f"${px:,.4f}",
+                f"{sz:,.2f}",
+                f"${usd:,.2f}",
+                giant_tag
+            )
+        console.print(ob_table)
+
+        flow_table = Table(title=f"📊 盘口承接力与多空失衡指标", border_style="magenta")
+        flow_table.add_column("量化指标", justify="left")
+        flow_table.add_column("当前数值", justify="right")
+        flow_table.add_column("风控安全门槛", justify="left")
+        flow_table.add_column("诊断结论", justify="center")
+
+        top5_usd = cause.get("top5_bid_usd", 0.0)
+        imbalance = cause.get("orderbook_imbalance", 1.0)
+        depth_m = metrics.get("depth_multiple", 1.0)
+        max_usd = cause.get("max_single_bid_usd", 0.0)
+
+        flow_table.add_row(
+            "前 5 档合约买盘厚度",
+            f"${top5_usd:,.2f} USD",
+            ">= $5,000 USD (巨单 >= $50,000)",
+            "[bold green]厚实承接[/bold green]" if top5_usd >= 10000 else "[bold red]深度薄弱[/bold red]"
+        )
+        flow_table.add_row(
+            "盘口买卖失衡率 (Bid/Ask)",
+            f"{imbalance:.2f}x",
+            ">= 2.0x 判定为多头托底",
+            "[bold green]买方强势[/bold green]" if imbalance >= 2.0 else "[bold yellow]中性/均衡[/bold yellow]"
+        )
+        flow_table.add_row(
+            "买盘相对建仓倍数",
+            f"{depth_m:.2f}x",
+            ">= 2.5x 保证无滑点打穿",
+            "[bold green]流动性充足[/bold green]" if depth_m >= 2.5 else "[bold red]流动性不足[/bold red]"
+        )
+        flow_table.add_row(
+            "最大单笔买单挂单",
+            f"${max_usd:,.2f} USD",
+            ">= $20,000 USD 认定为大资金",
+            "[bold cyan]🐋 巨资存在[/bold cyan]" if max_usd >= auditor.giant_order_usd else "常规散单"
+        )
+        console.print(flow_table)
         return
 
 if __name__ == "__main__":

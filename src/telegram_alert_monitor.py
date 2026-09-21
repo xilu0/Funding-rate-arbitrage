@@ -222,6 +222,14 @@ class ArbitrageAlertMonitor:
         apr_pct = float(metric.get("apr_pct") or 0.0)
         if hasattr(self, "auditor") and self.auditor:
             self.auditor.record_tick(coin, spot_px, perp_px, spread_pct, apr_pct, now=now)
+            for tr in (metric.get("recent_trades") or []):
+                self.auditor.record_trade(
+                    coin=tr.get("coin", coin),
+                    side=tr.get("side", ""),
+                    px=tr.get("px", 0.0),
+                    sz=tr.get("sz", 0.0),
+                    now=tr.get("time")
+                )
 
         # Strategy 2: Automated Basis-Sniping execution hook (independent from human alert cooldown)
         if getattr(self, "auto_engine", None):
@@ -459,11 +467,33 @@ class ArbitrageAlertMonitor:
             p10 = metrics.get("p10_floor_pct", 0)
             depth_m = metrics.get("depth_multiple", 1.0)
             advice = audit_result.get("advice", "")
+
+            cause_card = ""
+            cause = audit_result.get("cause_analysis")
+            if cause:
+                cause_title = cause.get("cause_title", "")
+                max_bid_usd = cause.get("max_single_bid_usd", 0.0)
+                max_bid_px = cause.get("max_single_bid_px", 0.0)
+                max_bid_sz = cause.get("max_single_bid_sz", 0.0)
+                top5_bid_usd = cause.get("top5_bid_usd", 0.0)
+                imbalance = cause.get("orderbook_imbalance", 1.0)
+                taker_buy_usd = cause.get("recent_taker_buy_usd", 0.0)
+
+                order_info = f"`${max_bid_usd:,.0f} USD` ({max_bid_sz} @ `${max_bid_px}`)" if max_bid_usd > 0 else "无极端巨单"
+                cause_card = (
+                    f"🐋 *盘口微观动因透视 (Microstructure)*:\n"
+                    f"• 动因定性: {cause_title}\n"
+                    f"• 最大托单: {order_info}\n"
+                    f"• 买方深度: 前5档买盘 `${top5_bid_usd:,.0f} USD` (买卖比 `{imbalance:.1f}x`)\n"
+                    f"• 主动买流: 30s内合约主动买入 `${taker_buy_usd:,.0f} USD`\n"
+                )
+
             audit_section = (
                 f"💎 *基差稳健性审核 (Reliable Basis Audit)*:\n"
                 f"• 稳健评级: *`{score}/100`* ({badge})\n"
                 f"• 平台持续: `{dur:.1f}s` (最差底线: `{p10:+.3f}%`)\n"
                 f"• 盘口深度: `{depth_m:.1f}x` 买方挂单缓冲\n"
+                f"{cause_card}"
                 f"• 量化建议: _{advice}_\n\n"
             )
 
